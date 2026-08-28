@@ -1,0 +1,14 @@
+{
+  "name": "atelier",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local asset pipeline: an MCP server, a daemon, and a browser extension that record and replay browser workflows to produce assets.",
+  "type": "module",
+  "workspaces": ["server", "extension"],
+  "scripts": {
+    "build": "npm run build --workspace server && npm run build --workspace extension",
+    "dev": "npm run dev --workspace server",
+    "test": "npm run test --workspace server"
+  },
+  "engines": { "node": ">=22" }
+}

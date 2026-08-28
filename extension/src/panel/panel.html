@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Atelier</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <!-- Offline is the one piece of chrome that is always allowed to shout,
+         because nothing else in the panel means anything when it is true. -->
+    <div id="offline" class="banner" hidden>
+      <strong>Not connected</strong>
+      <span>Start Claude Code, or run <code>atelierd</code>.</span>
+    </div>
+
+    <!-- Needs you: first, because it is the only thing that is your move. -->
+    <section id="blocked-section" hidden>
+      <h2 class="label label-alert">Needs you</h2>
+      <ul id="blocked" class="cards"></ul>
+    </section>
+
+    <section id="running-section" hidden>
+      <h2 class="label">Running</h2>
+      <ul id="running" class="cards"></ul>
+    </section>
+
+    <section id="record-section">
+      <button id="record" class="record">
+        <span class="record-dot"></span>
+        <span id="record-label">Record a workflow</span>
+      </button>
+      <p id="record-hint" class="hint" hidden>
+        Do the thing once. Hit <strong>Capture output</strong> then click the result, and
+        <strong>Stop</strong> when you are done.
+      </p>
+    </section>
+
+    <!-- Everything below is reference, not action, so it is collapsed. -->
+    <details id="workflows-details">
+      <summary>
+        <span>Workflows</span>
+        <span id="workflow-count" class="count">0</span>
+      </summary>
+      <ul id="workflows" class="list"></ul>
+      <p id="drafts-note" class="hint" hidden></p>
+    </details>
+
+    <dialog id="name-dialog">
+      <form method="dialog">
+        <h3>Name this workflow</h3>
+        <p class="hint">Claude calls it by this name. Short and kebab-case.</p>
+        <input id="name-input" name="name" placeholder="generate-image" autocomplete="off" />
+        <menu>
+          <button value="cancel" class="ghost">Cancel</button>
+          <button id="name-go" value="ok" class="primary">Start recording</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

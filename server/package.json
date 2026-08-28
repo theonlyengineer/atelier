@@ -1,0 +1,25 @@
+{
+  "name": "@atelier/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "atelier-mcp": "./dist/mcp/bin.js",
+    "atelierd": "./dist/daemon.js"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "node --disable-warning=ExperimentalWarning --experimental-strip-types --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0"
+  }
+}

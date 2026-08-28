@@ -1,0 +1,54 @@
+/* The recording bar. Deliberately loud — it is a mode, and a mode you can forget
+   you are in is a bug. */
+#atelier-bar {
+  position: fixed;
+  z-index: 2147483647;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px 8px 14px;
+  border-radius: 999px;
+  background: #101014;
+  color: #fff;
+  font: 500 13px/1 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 35%);
+  user-select: none;
+}
+
+#atelier-bar .atelier-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e5484d;
+  animation: atelier-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes atelier-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+#atelier-bar .atelier-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#atelier-bar .atelier-count { opacity: 0.5; font-variant-numeric: tabular-nums; }
+
+#atelier-bar .atelier-btn {
+  all: unset;
+  cursor: pointer;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 12%);
+  font: inherit;
+  color: #fff;
+}
+#atelier-bar .atelier-btn:hover { background: rgb(255 255 255 / 22%); }
+#atelier-bar .atelier-btn.atelier-armed { background: #2d7d46; }
+#atelier-bar .atelier-stop { background: #e5484d; }
+#atelier-bar .atelier-stop:hover { background: #f2555a; }
+
+/* While the picker is armed, make it obvious that the next click is a choice
+   and not an interaction with the page. */
+html.atelier-picking, html.atelier-picking * { cursor: crosshair !important; }
+html.atelier-picking *:hover { outline: 2px solid #2d7d46 !important; }

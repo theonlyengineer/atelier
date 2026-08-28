@@ -1,0 +1,148 @@
+/*
+ * Three things on screen, two of which hide when empty. Everything else is
+ * behind a disclosure. There is no settings page: anything the server or the
+ * extension can work out for itself is not a question worth asking.
+ */
+:root {
+  --bg: #fbfbfa;
+  --fg: #16161a;
+  --muted: #6b6b76;
+  --line: #e4e4e0;
+  --alert: #c0392b;
+  --alert-bg: #fdf1ef;
+  --go: #2d7d46;
+  --card: #fff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131316;
+    --fg: #f0f0ee;
+    --muted: #9a9aa4;
+    --line: #2a2a30;
+    --alert: #f2555a;
+    --alert-bg: #2a1618;
+    --go: #4cae6a;
+    --card: #1b1b20;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 14px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.banner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  border-radius: 10px;
+  background: var(--alert-bg);
+  color: var(--alert);
+}
+.banner span { color: var(--muted); font-size: 12px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+
+section { margin-bottom: 18px; }
+
+.label {
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.label-alert { color: var(--alert); }
+
+.cards, .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.card {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+}
+.card.alert { border-color: var(--alert); }
+
+.card-title { font-weight: 600; }
+.card-sub { margin-top: 3px; color: var(--muted); font-size: 12px; }
+
+.actions { display: flex; gap: 8px; margin-top: 10px; }
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+}
+button:hover { border-color: var(--muted); }
+.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.ghost { color: var(--muted); }
+
+/* Progress is a bar, not a percentage: the number of steps is meaningless to
+   the reader, but "most of the way" is not. */
+.bar { height: 3px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 9px; }
+.bar > i { display: block; height: 100%; background: var(--go); transition: width 0.3s ease; }
+
+.record {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 11px 12px;
+  justify-content: center;
+}
+.record-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--alert); }
+.record.recording { border-color: var(--alert); color: var(--alert); }
+.record.recording .record-dot { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.hint { margin: 8px 2px 0; color: var(--muted); font-size: 12px; }
+
+details { border-top: 1px solid var(--line); padding-top: 12px; }
+summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+summary::-webkit-details-marker { display: none; }
+.count { font-variant-numeric: tabular-nums; }
+details[open] .list { margin-top: 10px; }
+
+.wf { padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.wf-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.wf-meta { margin-top: 2px; color: var(--muted); font-size: 11.5px; }
+
+.empty { color: var(--muted); font-size: 12px; padding: 2px; }
+
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--fg); padding: 16px; }
+dialog::backdrop { background: rgb(0 0 0 / 35%); }
+dialog h3 { margin: 0 0 4px; font-size: 14px; }
+dialog input {
+  width: 100%;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 14px 0 0; padding: 0; }
