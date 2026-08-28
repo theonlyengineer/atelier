@@ -20,6 +20,39 @@ const server = new McpServer({ name: 'atelier', version: '0.1.0' })
 /* ------------------------------------------------------------- discovery */
 
 server.registerTool(
+  'atelier_status',
+  {
+    title: 'Is Atelier ready',
+    description:
+      'Whether the daemon is running and whether a browser is attached to it. Check this before run_workflow: a workflow with no browser attached parks immediately and waits for a human, which is slower than telling them up front. Also reports counts of workflows, drafts, jobs and assets.',
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const o = await call<any>('/api/overview', {})
+      const browsers = o.browsers.length
+        ? o.browsers.map((b: any) => `${b.label} (${b.browser})`).join(', ')
+        : 'none — the extension is not connected'
+      const blocked = o.jobs.filter((j: any) => j.status === 'blocked')
+      return text(
+        `Daemon ${o.version} on 127.0.0.1:${o.port}, up ${Math.round(o.uptimeSeconds / 60)}m\n` +
+          `Browsers attached: ${browsers}\n` +
+          `Workflows: ${o.counts.workflows} active · Drafts awaiting review: ${o.counts.drafts}\n` +
+          `Jobs: ${o.jobs.length} in flight (${blocked.length} blocked) · Assets: ${o.counts.assets}` +
+          (blocked.length
+            ? `\n\nBlocked and waiting for a human:\n` +
+              blocked.map((j: any) => `  ${j.workflowName}: ${j.blockedReason}`).join('\n')
+            : ''),
+      )
+    } catch (e) {
+      return fail(
+        `The Atelier daemon is not reachable: ${(e as Error).message}\nAsk the human to run \`npm start\` in atelier/, or check ~/.atelier/atelierd.log.`,
+      )
+    }
+  },
+)
+
+server.registerTool(
   'list_workflows',
   {
     title: 'List browser workflows',
@@ -116,6 +149,71 @@ server.registerTool(
 )
 
 server.registerTool(
+  'list_jobs',
+  {
+    title: 'List recent jobs',
+    description:
+      'Recent workflow runs and their outcomes. Use it to find a job whose id you lost, or to see whether something is parked waiting for the human.',
+    inputSchema: {
+      statuses: z
+        .array(z.enum(['queued', 'running', 'blocked', 'done', 'failed', 'cancelled']))
+        .optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+    },
+  },
+  async ({ statuses, limit }) => {
+    const { jobs } = await call<{ jobs: Job[] }>('/api/jobs.list', { statuses, limit })
+    if (!jobs.length) return text('No jobs.')
+    return text(
+      jobs
+        .map(
+          (j) =>
+            `• ${j.id}  ${j.workflowName}  ${j.status}  step ${j.stepIndex}/${j.stepCount}` +
+            (j.blockedReason ? `\n    blocked: ${j.blockedReason}` : '') +
+            (j.error ? `\n    error: ${j.error}` : '') +
+            (j.assetIds.length ? `\n    assets: ${j.assetIds.join(', ')}` : ''),
+        )
+        .join('\n'),
+    )
+  },
+)
+
+server.registerTool(
+  'resume_job',
+  {
+    title: 'Resume a parked job',
+    description:
+      'Retry the step a blocked job stopped on. Only call this after the human says they have fixed whatever it was waiting for — signing in, solving a captcha, opening the browser. Resuming into the same obstacle just parks it again.',
+    inputSchema: { id: z.string() },
+  },
+  async ({ id }) => {
+    try {
+      const { job } = await call<{ job: Job }>('/api/jobs.resume', { id })
+      return text(`Resumed ${job.workflowName} at step ${job.stepIndex + 1}; status is now ${job.status}.`)
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
+  'cancel_job',
+  {
+    title: 'Cancel a job',
+    description: 'Stop a running or parked job. Its assets, if any, are kept.',
+    inputSchema: { id: z.string() },
+  },
+  async ({ id }) => {
+    try {
+      const { job } = await call<{ job: Job }>('/api/jobs.cancel', { id })
+      return text(`Cancelled ${job?.workflowName ?? id}.`)
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
   'job_status',
   {
     title: 'Check a workflow job',
@@ -189,6 +287,24 @@ server.registerTool(
         })
         .join('\n'),
     )
+  },
+)
+
+server.registerTool(
+  'delete_workflow',
+  {
+    title: 'Delete a workflow',
+    description:
+      'Remove a workflow by name. Assets it produced are kept — the prompt that made an image is worth having after the recipe is gone. Confirm with the human first: a workflow is a recording they made by hand and cannot be regenerated.',
+    inputSchema: { name: z.string() },
+  },
+  async ({ name }) => {
+    try {
+      await call('/api/workflows.delete', { name })
+      return text(`Deleted workflow "${name}". Its assets were kept.`)
+    } catch (e) {
+      return fail((e as Error).message)
+    }
   },
 )
 
@@ -279,6 +395,24 @@ server.registerTool(
         workflow,
       })
       return text(`Saved workflow "${saved.name}" with ${saved.steps.length} steps (${saved.status}).`)
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
+  'delete_draft',
+  {
+    title: 'Discard a recording',
+    description:
+      'Delete a draft that will not be promoted — a mis-recording, or one superseded by a better take. Say what was wrong with it when you tell the human, so they know what to do differently.',
+    inputSchema: { id: z.string() },
+  },
+  async ({ id }) => {
+    try {
+      await call('/api/drafts.delete', { id })
+      return text(`Discarded draft ${id}.`)
     } catch (e) {
       return fail((e as Error).message)
     }

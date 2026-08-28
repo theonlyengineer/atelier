@@ -86,13 +86,19 @@ and waits for you.
 ## Using it from Claude Code
 
 ```
+atelier_status                → is the daemon up, is a browser attached
 list_workflows                → what this machine can do
 run_workflow  name, inputs    → replay it, wait, return the asset
+list_jobs / job_status        → what ran, what is parked
+resume_job / cancel_job       → after the human clears an obstacle
 save_asset    id, path        → write the asset into the repo
 list_assets                   → reuse instead of regenerate
-list_drafts / get_draft / promote_draft   → the review pass
-define_workflow               → hand-write or repair one
+list_drafts / get_draft / promote_draft / delete_draft   → the review pass
+define_workflow / delete_workflow                        → hand-write or remove one
 ```
+
+Check `atelier_status` before `run_workflow`: a workflow with no browser attached parks
+and waits for a human, which is slower than saying so up front.
 
 For images on theonlyengineer.com, the prompt is the style guide from
 `gtm/wiki/image-style-guide.md` plus a one-line subject. Claude composes it; the

@@ -83,6 +83,11 @@ single burst of activity.
 profile, the timeouts — is worked out. A new user-facing option needs a reason that
 survives "could this be inferred?".
 
+**Every daemon capability needs an MCP tool.** The API routes exist so the MCP process
+can call them, not so a human can curl them — if a capability is only reachable over HTTP,
+Claude Code cannot use it consistently and will improvise. When you add a route to
+`http/api.ts`, add the matching tool in `mcp/bin.ts` in the same change.
+
 ## Testing browser behaviour
 
 There is no automated coverage for the extension yet; it is verified by hand in Chrome.

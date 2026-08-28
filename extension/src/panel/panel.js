@@ -23,6 +23,7 @@ const els = {
   retry: $('retry'),
   stamp: $('stamp'),
   recordDone: $('record-done'),
+  workflowsDetails: $('workflows-details'),
   draftsSection: $('drafts-section'),
   drafts: $('drafts'),
   dashboardLink: $('dashboard-link'),
@@ -31,7 +32,7 @@ const els = {
 /** Bumped with the manifest. Shown in the panel so "am I running the new code?"
  *  is answerable by looking, not by guessing — we mistook a stale build for a
  *  dead backend twice. */
-const PANEL_BUILD = '0.2.0'
+const PANEL_BUILD = '0.3.0'
 
 let recording = null
 let connected = false
@@ -120,6 +121,11 @@ function render(state, daemonUp, browsers = []) {
   els.running.replaceChildren(...running.map((j) => card(j)))
 
   els.workflowCount.textContent = String(state.workflows.length)
+  // Collapsed-by-default hid the one thing the user was looking for. Open it
+  // whenever there is something in it, and leave it alone once they touch it.
+  if (state.workflows.length && !els.workflowsDetails.dataset.touched) {
+    els.workflowsDetails.open = true
+  }
   if (state.workflows.length) {
     els.workflows.replaceChildren(
       ...state.workflows.map((w) => {
@@ -302,6 +308,22 @@ function startPolling() {
   // complication rather than an optimisation.
   timer = setInterval(refresh, 2000)
 }
+
+/*
+ * Chrome throttles timers hard in a document that is not visible — a side panel
+ * behind another tab can drop to roughly one tick a minute. That is why the
+ * panel looked frozen on backend changes made while it sat in the background.
+ * Refresh the moment it comes back rather than waiting for the next tick.
+ */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refresh()
+})
+window.addEventListener('focus', () => refresh())
+
+// Once the human opens or closes the disclosure, stop deciding it for them.
+els.workflowsDetails.addEventListener('toggle', () => {
+  els.workflowsDetails.dataset.touched = '1'
+})
 
 els.retry.onclick = async () => {
   els.offlineWhy.textContent = 'Checking…'
