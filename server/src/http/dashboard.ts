@@ -27,6 +27,9 @@ export const dashboardHtml = (version: string) => `<!doctype html>
            --alert:#f2555a; --alert-bg:#2a1618; --go:#4cae6a; --go-bg:#15251a; --idle:#6b6b76; }
   }
   *{box-sizing:border-box}
+  /* The hidden attribute is only the UA rule [hidden]{display:none}, which any
+     author display rule outranks. This bit the side panel — keep it explicit. */
+  [hidden]{display:none!important}
   body{margin:0;padding:32px 24px 64px;background:var(--bg);color:var(--fg);
        font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
   .wrap{max-width:940px;margin:0 auto}

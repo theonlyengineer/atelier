@@ -66,6 +66,12 @@ throw still replies, and an unhandled `msg.t` still replies. Returning `true` fr
 `onMessage` and then not responding is the single worst failure mode in this codebase:
 it is silent, it is invisible in DevTools, and it presents as a frozen button.
 
+**`[hidden] { display: none !important }` in both stylesheets is load-bearing.** The
+`hidden` attribute is implemented by the UA rule `[hidden] { display: none }`, which any
+author rule setting `display` outranks — `.banner { display: flex }` kept the offline
+banner permanently on screen no matter what the JS set, and cost most of a debugging
+session. Both surfaces toggle visibility with `hidden`, so do not remove that rule.
+
 **No settings page.** Anything the daemon or the extension can work out — the port, the
 profile, the timeouts — is worked out. A new user-facing option needs a reason that
 survives "could this be inferred?".

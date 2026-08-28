@@ -22,7 +22,13 @@ const els = {
   nameInput: $('name-input'),
   offlineWhy: $('offline-why'),
   retry: $('retry'),
+  stamp: $('stamp'),
 }
+
+/** Bumped with the manifest. Shown in the panel so "am I running the new code?"
+ *  is answerable by looking, not by guessing — we mistook a stale build for a
+ *  dead backend twice. */
+const PANEL_BUILD = '0.1.1'
 
 let recording = null
 let connected = false
@@ -250,9 +256,13 @@ async function refresh() {
       true,
       o.browsers,
     )
-  } catch {
+    els.stamp.textContent =
+      `panel ${PANEL_BUILD} · daemon ${o.version} on :${daemonPort} · ` +
+      `${o.browsers.length} browser${o.browsers.length === 1 ? '' : 's'} attached`
+  } catch (e) {
     daemonPort = null
     render({ jobs: [], drafts: 0, workflows: [] }, false, [])
+    els.stamp.textContent = `panel ${PANEL_BUILD} · daemon unreachable (${e.message})`
   }
 }
 
