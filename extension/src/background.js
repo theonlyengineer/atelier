@@ -56,7 +56,11 @@ async function probePort() {
 }
 
 async function connect() {
-  if (socket && socket.readyState <= WebSocket.OPEN) return
+  if (socket && socket.readyState <= WebSocket.OPEN) {
+    // Already connected or connecting; nothing to do, and `port` is whatever
+    // found this socket. Do not re-probe — that is what used to null it out.
+    return
+  }
 
   port = await probePort()
   if (!port) {
@@ -69,6 +73,9 @@ async function connect() {
 
   socket.addEventListener('open', () => {
     send({ t: MSG.HELLO, profileId, label, browser: 'chrome' })
+    // Tell any open panel immediately, rather than making it wait for the
+    // daemon's next state change — which, on an idle system, never comes.
+    chrome.runtime.sendMessage({ t: 'panel.connection', connected: true }).catch(() => {})
   })
 
   socket.addEventListener('message', (event) => {
@@ -84,6 +91,7 @@ async function connect() {
   socket.addEventListener('close', () => {
     socket = null
     setBadge('', '')
+    chrome.runtime.sendMessage({ t: 'panel.connection', connected: false }).catch(() => {})
   })
   socket.addEventListener('error', () => {
     try {
@@ -96,6 +104,18 @@ async function connect() {
 
 function send(msg) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg))
+}
+
+/**
+ * Whether we are actually talking to the daemon *right now*.
+ *
+ * Derived from the socket rather than from `port`, which only records that an
+ * HTTP probe once succeeded — a single failed probe used to leave `port` null
+ * while the socket was still open, and the panel would report "not connected"
+ * about a working connection.
+ */
+function isConnected() {
+  return socket?.readyState === WebSocket.OPEN
 }
 
 /* -------------------------------------------------------------- badging */
@@ -317,10 +337,25 @@ async function stopRecording() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ;(async () => {
     switch (msg.t) {
-      case 'panel.hello':
-        await connect()
-        sendResponse({ state, recording: recording ? { name: recording.draftName } : null, connected: !!port })
+      case 'panel.hello': {
+        try {
+          await connect()
+        } catch (e) {
+          // Never leave the panel awaiting a response it will not get: an
+          // unanswered sendMessage looks identical to "daemon is down".
+          console.error('[atelier] connect failed', e)
+        }
+        // The daemon only pushes state on change, so a panel opened during a
+        // quiet period would otherwise render the worker's stale cache.
+        if (isConnected()) send({ t: MSG.STATE_REQUEST })
+        sendResponse({
+          state,
+          recording: recording ? { name: recording.draftName } : null,
+          connected: isConnected(),
+          port,
+        })
         break
+      }
       case 'panel.resume':
         send({ t: MSG.JOB_RESUME, jobId: msg.jobId })
         sendResponse({ ok: true })

@@ -24,5 +24,6 @@ export const MSG = {
   JOB_RESUME: 'job.resume',
   JOB_CANCEL: 'job.cancel',
   DRAFT_SAVE: 'draft.save',
+  STATE_REQUEST: 'state.request',
   PING: 'ping',
 }

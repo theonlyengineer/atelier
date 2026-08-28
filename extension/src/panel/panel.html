@@ -8,10 +8,13 @@
   </head>
   <body>
     <!-- Offline is the one piece of chrome that is always allowed to shout,
-         because nothing else in the panel means anything when it is true. -->
+         because nothing else in the panel means anything when it is true. It
+         retries on its own, so the copy says what is happening rather than
+         handing out an instruction that is usually wrong. -->
     <div id="offline" class="banner" hidden>
       <strong>Not connected</strong>
-      <span>Start Claude Code, or run <code>atelierd</code>.</span>
+      <span id="offline-why">Looking for the Atelier daemon…</span>
+      <button id="retry" class="ghost retry">Retry now</button>
     </div>
 
     <!-- Needs you: first, because it is the only thing that is your move. -->

@@ -20,9 +20,12 @@ const els = {
   draftsNote: $('drafts-note'),
   dialog: $('name-dialog'),
   nameInput: $('name-input'),
+  offlineWhy: $('offline-why'),
+  retry: $('retry'),
 }
 
 let recording = null
+let connected = false
 
 /* --------------------------------------------------------------- render */
 
@@ -70,8 +73,9 @@ function card(job, { alert = false } = {}) {
   return li
 }
 
-function render(state, connected) {
-  els.offline.hidden = !!connected
+function render(state, isConnected) {
+  connected = !!isConnected
+  els.offline.hidden = connected
 
   const blocked = state.jobs.filter((j) => j.status === 'blocked')
   const running = state.jobs.filter((j) => j.status === 'running' || j.status === 'queued')
@@ -147,10 +151,67 @@ els.dialog.addEventListener('close', async () => {
 })
 
 chrome.runtime.onMessage.addListener((msg) => {
+  // A state frame is proof of a live socket, so it doubles as a connection ping.
   if (msg.t === 'panel.state') render(msg.state, true)
+  if (msg.t === 'panel.connection') {
+    connected = !!msg.connected
+    els.offline.hidden = connected
+    if (connected) stopRetrying()
+    else scheduleRetry()
+  }
 })
 
-const boot = await chrome.runtime.sendMessage({ t: 'panel.hello' })
-recording = boot?.recording ?? null
-renderRecording()
-render(boot?.state ?? { jobs: [], drafts: 0, workflows: [] }, boot?.connected)
+/**
+ * Ask the service worker where we stand.
+ *
+ * This has to be a loop, not a single question at open. The panel can be opened
+ * before the daemon is up, while the socket is mid-reconnect, or after MV3 has
+ * torn the service worker down — and in every one of those cases the honest
+ * first answer is "no" and the right behaviour is to ask again shortly.
+ */
+async function poll() {
+  let boot
+  try {
+    boot = await chrome.runtime.sendMessage({ t: 'panel.hello' })
+  } catch {
+    // The service worker was asleep and this message woke it; it will answer
+    // the next one. Distinguish it from a dead daemon, because the fix differs.
+    els.offlineWhy.textContent = 'Waking the extension…'
+    return false
+  }
+  if (!boot) {
+    els.offlineWhy.textContent = 'The extension background is not responding. Reload it at chrome://extensions.'
+    return false
+  }
+  recording = boot.recording ?? null
+  renderRecording()
+  render(boot.state ?? { jobs: [], drafts: 0, workflows: [] }, boot.connected)
+  if (!boot.connected) {
+    els.offlineWhy.textContent = boot.port
+      ? `Found the daemon on port ${boot.port} but the connection is not open yet…`
+      : 'No daemon on 127.0.0.1. Start Claude Code, or run npm start in atelier/.'
+  }
+  return !!boot.connected
+}
+
+let retryTimer = null
+
+function stopRetrying() {
+  clearTimeout(retryTimer)
+  retryTimer = null
+}
+
+function scheduleRetry(delay = 2000) {
+  stopRetrying()
+  retryTimer = setTimeout(async () => {
+    const ok = await poll()
+    if (!ok) scheduleRetry(Math.min(delay * 1.5, 15000))
+  }, delay)
+}
+
+els.retry.onclick = async () => {
+  els.offlineWhy.textContent = 'Checking…'
+  if (!(await poll())) scheduleRetry(2000)
+}
+
+if (!(await poll())) scheduleRetry(1000)

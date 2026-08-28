@@ -53,4 +53,8 @@ export type ClientMsg =
   | { t: 'job.resume'; jobId: string }
   | { t: 'job.cancel'; jobId: string }
   | { t: 'draft.save'; name: string; origins: string[]; raw: unknown }
+  /** Ask for a state frame now. The side panel opens at an arbitrary moment and
+   *  the daemon only pushes on change, so without this a panel opened during a
+   *  quiet period renders whatever the service worker last happened to cache. */
+  | { t: 'state.request' }
   | { t: 'ping' }

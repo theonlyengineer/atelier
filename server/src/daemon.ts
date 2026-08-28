@@ -306,6 +306,10 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
       }
       if (msg.t === 'ping') return
       if (!client) return // everything else requires a hello first
+      if (msg.t === 'state.request') {
+        pushState()
+        return
+      }
       hub.dispatch(msg, client)
     })
 
