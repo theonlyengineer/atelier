@@ -53,12 +53,26 @@ function card(job, { alert = false } = {}) {
     resume.className = 'primary'
     resume.textContent = 'Resume'
     // Retries the step it stopped on, so "I fixed it" is the whole interaction.
-    resume.onclick = () => chrome.runtime.sendMessage({ t: 'panel.resume', jobId: job.id })
+    resume.onclick = async () => {
+      resume.disabled = true
+      try {
+        await daemon('/api/jobs.resume', { id: job.id })
+      } finally {
+        await refresh()
+      }
+    }
 
     const cancel = document.createElement('button')
     cancel.className = 'ghost'
     cancel.textContent = 'Cancel'
-    cancel.onclick = () => chrome.runtime.sendMessage({ t: 'panel.cancel', jobId: job.id })
+    cancel.onclick = async () => {
+      cancel.disabled = true
+      try {
+        await daemon('/api/jobs.cancel', { id: job.id })
+      } finally {
+        await refresh()
+      }
+    }
 
     actions.append(resume, cancel)
     li.append(actions)
@@ -73,9 +87,19 @@ function card(job, { alert = false } = {}) {
   return li
 }
 
-function render(state, isConnected) {
-  connected = !!isConnected
-  els.offline.hidden = connected
+function render(state, daemonUp, browsers = []) {
+  connected = !!daemonUp
+  // Two different failures, two different fixes. Conflating them is what made
+  // the old banner give the wrong instruction most of the time.
+  const attached = browsers.length > 0
+  els.offline.hidden = connected && attached
+  if (!connected) {
+    els.offlineWhy.textContent =
+      'No daemon on 127.0.0.1. Start Claude Code, or run npm start in atelier/.'
+  } else if (!attached) {
+    els.offlineWhy.textContent =
+      'The daemon is running, but this browser has not attached yet. Reload Atelier at chrome://extensions.'
+  }
 
   const blocked = state.jobs.filter((j) => j.status === 'blocked')
   const running = state.jobs.filter((j) => j.status === 'running' || j.status === 'queued')
@@ -127,9 +151,11 @@ function renderRecording() {
 
 els.record.onclick = async () => {
   if (recording) {
-    await chrome.runtime.sendMessage({ t: 'panel.record.stop' })
+    const res = await worker({ t: 'panel.record.stop' })
+    if (res?.error) return alert(`Could not stop recording: ${res.error}`)
     recording = null
     renderRecording()
+    await refresh()
     return
   }
   els.nameInput.value = ''
@@ -145,73 +171,115 @@ els.dialog.addEventListener('close', async () => {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
-  await chrome.runtime.sendMessage({ t: 'panel.record.start', name })
+  const res = await worker({ t: 'panel.record.start', name })
+  if (res?.error) {
+    alert(`Could not start recording: ${res.error}\n\nReload Atelier at chrome://extensions and try again.`)
+    return
+  }
   recording = { name }
   renderRecording()
 })
 
-chrome.runtime.onMessage.addListener((msg) => {
-  // A state frame is proof of a live socket, so it doubles as a connection ping.
-  if (msg.t === 'panel.state') render(msg.state, true)
-  if (msg.t === 'panel.connection') {
-    connected = !!msg.connected
-    els.offline.hidden = connected
-    if (connected) stopRetrying()
-    else scheduleRetry()
-  }
-})
+/* ----------------------------------------------------------- the daemon */
 
 /**
- * Ask the service worker where we stand.
+ * The panel talks to the daemon directly.
  *
- * This has to be a loop, not a single question at open. The panel can be opened
- * before the daemon is up, while the socket is mid-reconnect, or after MV3 has
- * torn the service worker down — and in every one of those cases the honest
- * first answer is "no" and the right behaviour is to ask again shortly.
+ * It used to ask the service worker, which meant a sleeping or wedged worker
+ * made the panel claim the daemon was down — and an MV3 listener that returns
+ * `true` without calling sendResponse hangs the caller forever, with no error
+ * anywhere. The panel is an extension page with host permissions for
+ * 127.0.0.1, so it can just ask. The worker is still needed to *drive* a
+ * browser; it is not needed to *describe* one.
  */
-async function poll() {
-  let boot
+const PORTS = [7717, 7718, 7719, 7720]
+let daemonPort = null
+
+async function findDaemon() {
+  const candidates = daemonPort ? [daemonPort, ...PORTS] : PORTS
+  for (const port of candidates) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(700),
+      })
+      if (res.ok) return port
+    } catch {
+      /* not this one */
+    }
+  }
+  return null
+}
+
+async function daemon(path, body = {}) {
+  if (!daemonPort) daemonPort = await findDaemon()
+  if (!daemonPort) throw new Error('no daemon')
+  const res = await fetch(`http://127.0.0.1:${daemonPort}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(4000),
+  })
+  const payload = await res.json()
+  if (payload.ok === false) throw new Error(payload.error || 'daemon error')
+  return payload.result
+}
+
+/* ----------------------------------------------------------- the service worker */
+
+/**
+ * Recording needs tabs and scripting, so it has to go through the worker. Every
+ * call is bounded: a worker that accepts a message and never answers must not
+ * be able to freeze a button.
+ */
+async function worker(msg, timeoutMs = 3000) {
+  return Promise.race([
+    chrome.runtime.sendMessage(msg).catch((e) => ({ error: String(e) })),
+    new Promise((r) => setTimeout(() => r({ error: 'the extension background did not respond' }), timeoutMs)),
+  ])
+}
+
+/* ------------------------------------------------------------------ polling */
+
+let timer = null
+
+async function refresh() {
   try {
-    boot = await chrome.runtime.sendMessage({ t: 'panel.hello' })
+    const o = await daemon('/api/overview')
+    render(
+      { jobs: o.jobs, drafts: o.counts.drafts, workflows: o.workflows },
+      true,
+      o.browsers,
+    )
   } catch {
-    // The service worker was asleep and this message woke it; it will answer
-    // the next one. Distinguish it from a dead daemon, because the fix differs.
-    els.offlineWhy.textContent = 'Waking the extension…'
-    return false
+    daemonPort = null
+    render({ jobs: [], drafts: 0, workflows: [] }, false, [])
   }
-  if (!boot) {
-    els.offlineWhy.textContent = 'The extension background is not responding. Reload it at chrome://extensions.'
-    return false
-  }
-  recording = boot.recording ?? null
-  renderRecording()
-  render(boot.state ?? { jobs: [], drafts: 0, workflows: [] }, boot.connected)
-  if (!boot.connected) {
-    els.offlineWhy.textContent = boot.port
-      ? `Found the daemon on port ${boot.port} but the connection is not open yet…`
-      : 'No daemon on 127.0.0.1. Start Claude Code, or run npm start in atelier/.'
-  }
-  return !!boot.connected
 }
 
-let retryTimer = null
-
-function stopRetrying() {
-  clearTimeout(retryTimer)
-  retryTimer = null
-}
-
-function scheduleRetry(delay = 2000) {
-  stopRetrying()
-  retryTimer = setTimeout(async () => {
-    const ok = await poll()
-    if (!ok) scheduleRetry(Math.min(delay * 1.5, 15000))
-  }, delay)
+function startPolling() {
+  clearInterval(timer)
+  // Localhost, a few hundred bytes. Cheap enough that push would be a
+  // complication rather than an optimisation.
+  timer = setInterval(refresh, 2000)
 }
 
 els.retry.onclick = async () => {
   els.offlineWhy.textContent = 'Checking…'
-  if (!(await poll())) scheduleRetry(2000)
+  daemonPort = null
+  await refresh()
 }
 
-if (!(await poll())) scheduleRetry(1000)
+// Keep listening for worker pushes — they arrive sooner than the next poll —
+// but never depend on them.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.t === 'panel.state') refresh()
+  if (msg.t === 'panel.connection') refresh()
+})
+
+;(async () => {
+  const boot = await worker({ t: 'panel.hello' })
+  recording = boot?.recording ?? null
+  renderRecording()
+  await refresh()
+  startPolling()
+})()

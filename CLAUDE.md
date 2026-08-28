@@ -54,6 +54,18 @@ that line it is on.
 resumes on the same step. Do not add automatic retries around it — the only sensible
 retry is a human looking at the screen.
 
+**The panel reads from the daemon, not from the service worker.** `panel.js` fetches
+`/api/overview` over HTTP directly. Routing panel state through the worker meant a
+sleeping or wedged worker made the panel claim the daemon was down — and an MV3 listener
+that returns `true` without calling `sendResponse` hangs the caller forever with nothing
+logged anywhere. The worker is needed to *drive* a browser (tabs, scripting, recording);
+it is not needed to *describe* one. Keep that split.
+
+**Every message the worker accepts must be answered.** `route()` is wrapped so that a
+throw still replies, and an unhandled `msg.t` still replies. Returning `true` from
+`onMessage` and then not responding is the single worst failure mode in this codebase:
+it is silent, it is invisible in DevTools, and it presents as a frozen button.
+
 **No settings page.** Anything the daemon or the extension can work out — the port, the
 profile, the timeouts — is worked out. A new user-facing option needs a reason that
 survives "could this be inferred?".

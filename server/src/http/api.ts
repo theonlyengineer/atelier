@@ -15,6 +15,9 @@ export interface ApiDeps {
   hub: Hub
   runner: Runner
   version: string
+  /** The dashboard/panel snapshot. Injected because the daemon owns uptime and
+   *  the log tail, which do not belong in the repo layer. */
+  overview: () => unknown
 }
 
 type Handler = (body: any, deps: ApiDeps) => unknown
@@ -29,6 +32,12 @@ export const routes: Record<string, Handler> = {
     version: d.version,
     browsers: d.hub.connected().map((c) => ({ profileId: c.profileId, label: c.label })),
   }),
+
+  /** Everything a client needs to render: status, jobs, workflows, assets.
+   *  The dashboard streams this over SSE; the side panel polls it. */
+  '/api/overview': (_b, d) => d.overview(),
+
+  '/api/jobs.resume': (b, d) => ({ job: d.runner.resume(b?.id ?? missing('id')) }),
 
   '/api/workflows.list': (b) => {
     const all = repo.listWorkflows(b?.status)

@@ -9,6 +9,10 @@
  */
 import { CANDIDATE_PORTS, MSG } from './protocol.js'
 
+/** Breadcrumbs. An MV3 worker with a silent console is indistinguishable from a
+ *  dead one, which is exactly the confusion this cost an afternoon. */
+const log = (...a) => console.log('[atelier]', ...a)
+
 let socket = null
 let port = null
 /** Latest daemon state, mirrored so the side panel opens instantly. */
@@ -72,6 +76,7 @@ async function connect() {
   socket = new WebSocket(`ws://127.0.0.1:${port}/ws`)
 
   socket.addEventListener('open', () => {
+    log('connected to daemon on', port)
     send({ t: MSG.HELLO, profileId, label, browser: 'chrome' })
     // Tell any open panel immediately, rather than making it wait for the
     // daemon's next state change — which, on an idle system, never comes.
@@ -88,10 +93,16 @@ async function connect() {
     handle(msg)
   })
 
-  socket.addEventListener('close', () => {
-    socket = null
-    setBadge('', '')
-    chrome.runtime.sendMessage({ t: 'panel.connection', connected: false }).catch(() => {})
+  const mine = socket
+  socket.addEventListener('close', (e) => {
+    // Only clear the reference if this is still the current socket: a slow close
+    // on a replaced connection would otherwise wipe the live one.
+    if (socket === mine) {
+      socket = null
+      setBadge('', '')
+      chrome.runtime.sendMessage({ t: 'panel.connection', connected: false }).catch(() => {})
+    }
+    log('socket closed', e.code || '')
   })
   socket.addEventListener('error', () => {
     try {
@@ -336,60 +347,82 @@ async function stopRecording() {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   ;(async () => {
-    switch (msg.t) {
-      case 'panel.hello': {
-        try {
-          await connect()
-        } catch (e) {
-          // Never leave the panel awaiting a response it will not get: an
-          // unanswered sendMessage looks identical to "daemon is down".
-          console.error('[atelier] connect failed', e)
-        }
-        // The daemon only pushes state on change, so a panel opened during a
-        // quiet period would otherwise render the worker's stale cache.
-        if (isConnected()) send({ t: MSG.STATE_REQUEST })
-        sendResponse({
-          state,
-          recording: recording ? { name: recording.draftName } : null,
-          connected: isConnected(),
-          port,
-        })
-        break
+    let answered = false
+    const reply = (payload) => {
+      if (answered) return
+      answered = true
+      try {
+        sendResponse(payload)
+      } catch {
+        /* the caller went away */
       }
-      case 'panel.resume':
-        send({ t: MSG.JOB_RESUME, jobId: msg.jobId })
-        sendResponse({ ok: true })
-        break
-      case 'panel.cancel':
-        send({ t: MSG.JOB_CANCEL, jobId: msg.jobId })
-        sendResponse({ ok: true })
-        break
-      case 'panel.record.start':
-        await startRecording(msg.name)
-        sendResponse({ ok: true })
-        break
-      case 'panel.record.stop':
-        await stopRecording()
-        sendResponse({ ok: true })
-        break
-      case 'record.action':
-        if (recording) {
-          recording.actions.push(msg.action)
-          if (msg.action.origin) recording.origins.add(msg.action.origin)
-          chrome.runtime.sendMessage({ t: 'panel.recordCount', count: recording.actions.length }).catch(() => {})
-        }
-        sendResponse({ ok: true })
-        break
-      case 'record.stopFromPage':
-        await stopRecording()
-        sendResponse({ ok: true })
-        break
-      default:
-        sendResponse({ ok: false })
     }
+    try {
+      await route(msg, reply)
+    } catch (e) {
+      log('handler failed', msg?.t, e)
+      reply({ error: String(e?.message || e) })
+    }
+    // Belt and braces: a message we accepted but did not answer would hang the
+    // caller forever, because we returned true.
+    reply({ error: `unhandled message ${msg?.t}` })
   })()
   return true
 })
+
+async function route(msg, sendResponse) {
+  switch (msg.t) {
+    case 'panel.hello': {
+      try {
+        await connect()
+      } catch (e) {
+        // Never leave the panel awaiting a response it will not get: an
+        // unanswered sendMessage looks identical to "daemon is down".
+        console.error('[atelier] connect failed', e)
+      }
+      // The daemon only pushes state on change, so a panel opened during a
+      // quiet period would otherwise render the worker's stale cache.
+      if (isConnected()) send({ t: MSG.STATE_REQUEST })
+      sendResponse({
+        state,
+        recording: recording ? { name: recording.draftName } : null,
+        connected: isConnected(),
+        port,
+      })
+      break
+    }
+    case 'panel.resume':
+      send({ t: MSG.JOB_RESUME, jobId: msg.jobId })
+      sendResponse({ ok: true })
+      break
+    case 'panel.cancel':
+      send({ t: MSG.JOB_CANCEL, jobId: msg.jobId })
+      sendResponse({ ok: true })
+      break
+    case 'panel.record.start':
+      await startRecording(msg.name)
+      sendResponse({ ok: true })
+      break
+    case 'panel.record.stop':
+      await stopRecording()
+      sendResponse({ ok: true })
+      break
+    case 'record.action':
+      if (recording) {
+        recording.actions.push(msg.action)
+        if (msg.action.origin) recording.origins.add(msg.action.origin)
+        chrome.runtime.sendMessage({ t: 'panel.recordCount', count: recording.actions.length }).catch(() => {})
+      }
+      sendResponse({ ok: true })
+      break
+    case 'record.stopFromPage':
+      await stopRecording()
+      sendResponse({ ok: true })
+      break
+    default:
+      sendResponse({ ok: false })
+  }
+}
 
 /* ------------------------------------------------------------ lifecycle */
 

@@ -170,7 +170,7 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     onChange: pushState,
     notify: (title, body) => log(`NOTIFY ${title}: ${body}`),
   })
-  deps = { hub, runner, version: VERSION }
+  deps = { hub, runner, version: VERSION, overview }
 
   const server = createServer(async (req, res) => {
     // Loopback only. The daemon binds 127.0.0.1 as well, so this is belt and
