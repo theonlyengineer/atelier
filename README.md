@@ -22,18 +22,49 @@ npm install
 npm run build
 ```
 
-Then load the extension: `chrome://extensions` → Developer mode → **Load unpacked** →
-select `extension/`.
+### Load the extension
 
-Register the MCP server with Claude Code (from the workspace root):
+1. Open **`chrome://extensions`**
+2. Turn on **Developer mode** (top right)
+3. **Load unpacked** → select the **`extension/`** folder in this repo
+4. Pin Atelier to the toolbar, and click it to open the side panel
+
+The extension finds the daemon on localhost by itself. There is nothing to paste and
+no settings page.
+
+### Start the daemon
+
+It starts itself the first time Claude Code calls a tool, so usually you do nothing.
+To run it by hand — to look at the dashboard before wiring anything up:
+
+```sh
+npm start
+```
+
+### Register with Claude Code
+
+From the workspace root:
 
 ```sh
 claude mcp add atelier -- node /absolute/path/to/atelier/server/dist/mcp/bin.js
 ```
 
-There is nothing else to configure. The daemon starts itself on the first tool call,
-the extension finds it on localhost, and the pairing is implicit because only local
+There is nothing else to configure. The pairing is implicit because only local
 processes can reach the port.
+
+## Where to look
+
+**`http://127.0.0.1:7717`** — the dashboard. Whether the daemon is up, which browsers
+are connected, what is running, what is stuck, the workflows it knows, thumbnails of
+recent assets, and the tail of the log. It updates live; there is nothing to refresh.
+
+The dashboard and the extension side panel are deliberately different things. The
+**side panel** is the action surface: the one or two things that need you, in the
+browser where you would act on them. The **dashboard** is the observation surface:
+everything, with detail, for when something is wrong and you want to look at it.
+
+If the page will not load at all, the daemon is not running — `npm start`, or check
+`~/.atelier/atelierd.log`.
 
 ## Recording a workflow
 

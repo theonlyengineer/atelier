@@ -8,16 +8,17 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { writeFileSync, appendFileSync } from 'node:fs'
+import { writeFileSync, appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DEFAULT_PORT, PORT_FILE, ensureDirs, LOG_FILE } from './paths.ts'
+import { DEFAULT_PORT, PORT_FILE, ensureDirs, LOG_FILE, HOME, blobPath } from './paths.ts'
 import { open } from './db/index.ts'
 import * as repo from './db/repo.ts'
 import * as assets from './core/assets.ts'
 import { Hub } from './ws/hub.ts'
 import { Runner } from './core/runner.ts'
 import { routes, type ApiDeps } from './http/api.ts'
+import { dashboardHtml } from './http/dashboard.ts'
 import type { ClientMsg } from './ws/protocol.ts'
 
 export const VERSION = '0.1.0'
@@ -30,6 +31,17 @@ const log = (...parts: unknown[]) => {
     /* logging must never take the daemon down */
   }
   if (process.env.ATELIER_VERBOSE) process.stderr.write(line)
+}
+
+/** Last N log lines, cheaply. The file is small and rotated by nothing, so a
+ *  full read is fine at the sizes this reaches in practice. */
+function tailLog(lines: number): string {
+  try {
+    if (!existsSync(LOG_FILE)) return ''
+    return readFileSync(LOG_FILE, 'utf-8').trimEnd().split('\n').slice(-lines).join('\n')
+  } catch {
+    return ''
+  }
 }
 
 function readJson(req: IncomingMessage, limitBytes = 8 * 1024 * 1024): Promise<any> {
@@ -90,8 +102,59 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
 
   const hub = new Hub()
   let deps: ApiDeps
+  const startedAt = Date.now()
+
+  /** Everything the dashboard renders, in one snapshot. */
+  const overview = () => ({
+    version: VERSION,
+    port,
+    home: HOME,
+    uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+    browsers: hub.connected().map((c) => ({
+      profileId: c.profileId,
+      label: c.label,
+      browser: c.browser,
+    })),
+    jobs: repo.listJobs(['queued', 'running', 'blocked'], 20),
+    recent: repo.listJobs(['done', 'failed', 'cancelled'], 8),
+    workflows: repo.listWorkflows().map((w) => ({
+      name: w.name,
+      description: w.description,
+      status: w.status,
+      produces: w.produces,
+      origins: w.origins,
+      steps: w.steps.length,
+    })),
+    assets: repo.listAssets(12),
+    counts: {
+      workflows: repo.listWorkflows('active').length,
+      drafts: repo.listDrafts(true).length,
+      assets: repo.listAssets(1000).length,
+      jobs: repo.listJobs(undefined, 1000).length,
+    },
+    // The last few lines are almost always what you want when something is
+    // wrong, and opening a file is one step too many at that moment.
+    log: tailLog(40),
+  })
+
+  /** Dashboard connections. Separate from the extension hub: these are
+   *  read-only observers and must never be sent commands. */
+  const watchers = new Set<ServerResponse>()
+
+  const pushOverview = () => {
+    if (!watchers.size) return
+    const frame = `data: ${JSON.stringify(overview())}\n\n`
+    for (const res of watchers) {
+      try {
+        res.write(frame)
+      } catch {
+        watchers.delete(res)
+      }
+    }
+  }
 
   const pushState = () => {
+    pushOverview()
     hub.broadcast({
       t: 'state',
       jobs: repo.listJobs(['queued', 'running', 'blocked'], 20),
@@ -131,6 +194,54 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     res.setHeader('access-control-allow-origin', '*')
 
     if (url.pathname === '/health') return json(res, 200, { ok: true, version: VERSION })
+
+    if (url.pathname === '/' && req.method === 'GET') {
+      const html = dashboardHtml(VERSION)
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': Buffer.byteLength(html),
+      })
+      return res.end(html)
+    }
+
+    if (url.pathname === '/events' && req.method === 'GET') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      })
+      res.write(`data: ${JSON.stringify(overview())}\n\n`)
+      watchers.add(res)
+      // A comment frame every 25s keeps the connection off any idle timeout and
+      // refreshes the uptime reading without a state change.
+      const beat = setInterval(() => {
+        try {
+          res.write(`data: ${JSON.stringify(overview())}\n\n`)
+        } catch {
+          clearInterval(beat)
+        }
+      }, 25_000)
+      req.on('close', () => {
+        clearInterval(beat)
+        watchers.delete(res)
+      })
+      return
+    }
+
+    // Blob bytes, so the dashboard can show what was actually captured.
+    if (url.pathname.startsWith('/asset/') && req.method === 'GET') {
+      const asset = repo.getAsset(url.pathname.slice('/asset/'.length))
+      if (!asset) return json(res, 404, { error: 'no such asset' })
+      const path = blobPath(asset.sha256)
+      if (!existsSync(path)) return json(res, 404, { error: 'blob missing' })
+      const bytes = readFileSync(path)
+      res.writeHead(200, {
+        'content-type': asset.mime,
+        'content-length': bytes.byteLength,
+        'cache-control': 'public, max-age=31536000, immutable',
+      })
+      return res.end(bytes)
+    }
 
     // Artifact upload from the extension: raw body, metadata in headers, so
     // there is no multipart parser to maintain.
