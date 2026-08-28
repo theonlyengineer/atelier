@@ -270,7 +270,12 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
           mime,
           jobId,
           workflowName: job?.workflowName ?? null,
-          prompt: prompt ?? (job ? JSON.stringify(job.inputs) : null),
+          // Prefer the actual prompt input over a JSON dump of every input:
+          // this string is what the dashboard shows and what makes an asset
+          // findable months later.
+          prompt:
+            prompt ??
+            (job ? (job.inputs.prompt ?? job.inputs.subject ?? JSON.stringify(job.inputs)) : null),
           tags: job ? [job.workflowName] : [],
         })
         if (jobId) repo.addJobEvent(jobId, 'asset', { assetId: asset.id, bytes: asset.bytes })
