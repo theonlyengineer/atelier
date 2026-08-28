@@ -17,8 +17,8 @@ let socket = null
 let port = null
 /** Latest daemon state, mirrored so the side panel opens instantly. */
 let state = { jobs: [], drafts: 0, workflows: [] }
-/** { draftName, tabId, actions[], origins:Set } while recording. */
-let recording = null
+/* Recording state is NOT held here — see getRecording()/setRecording(). A module
+   variable does not survive the service worker being terminated mid-recording. */
 
 /* ------------------------------------------------------------- identity */
 
@@ -78,6 +78,7 @@ async function connect() {
   socket.addEventListener('open', () => {
     log('connected to daemon on', port)
     send({ t: MSG.HELLO, profileId, label, browser: 'chrome' })
+    flushPendingDrafts()
     // Tell any open panel immediately, rather than making it wait for the
     // daemon's next state change — which, on an idle system, never comes.
     chrome.runtime.sendMessage({ t: 'panel.connection', connected: true }).catch(() => {})
@@ -312,36 +313,122 @@ async function upload(jobId, workflowName, capture) {
 
 /* ------------------------------------------------------------- recording */
 
+/**
+ * Recording state lives in chrome.storage.session, not in a module variable.
+ *
+ * MV3 terminates the service worker after ~30 seconds without events, and a
+ * recording session is by definition time spent interacting with the *page* —
+ * for image generation, most of it is spent waiting for a render. A module
+ * variable is gone by the time you press Stop, and every captured action goes
+ * with it, silently. Session storage survives the worker and dies with the
+ * browser, which is exactly the lifetime a recording wants.
+ */
+const REC_KEY = 'atelier:recording'
+const PENDING_KEY = 'atelier:pendingDrafts'
+
+async function getRecording() {
+  const bag = await chrome.storage.session.get(REC_KEY)
+  return bag[REC_KEY] ?? null
+}
+
+async function setRecording(rec) {
+  if (rec) await chrome.storage.session.set({ [REC_KEY]: rec })
+  else await chrome.storage.session.remove(REC_KEY)
+}
+
+async function injectRecorder(tabId, draftName) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['src/content/recorder.js'],
+  })
+  await chrome.scripting.insertCSS({ target: { tabId }, files: ['src/content/overlay.css'] })
+  await chrome.tabs.sendMessage(tabId, { t: 'record.begin', draftName })
+}
+
 async function startRecording(draftName) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (!tab?.id) throw new Error('no active tab')
-  recording = { draftName, tabId: tab.id, actions: [], origins: new Set() }
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ['src/content/recorder.js'],
-  })
-  await chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: ['src/content/overlay.css'] })
-  await chrome.tabs.sendMessage(tab.id, { t: 'record.begin', draftName })
+  await setRecording({ draftName, tabId: tab.id, actions: [], origins: [] })
+  await injectRecorder(tab.id, draftName)
+  log('recording started:', draftName)
   reflect({ ...state })
 }
 
+async function addAction(action) {
+  const rec = await getRecording()
+  if (!rec) return 0
+  rec.actions.push(action)
+  if (action.origin && !rec.origins.includes(action.origin)) rec.origins.push(action.origin)
+  await setRecording(rec)
+  return rec.actions.length
+}
+
 async function stopRecording() {
-  if (!recording) return
+  const rec = await getRecording()
+  if (!rec) {
+    log('stop requested with no recording in progress')
+    return { ok: false, error: 'no recording in progress' }
+  }
+
   const payload = {
     t: MSG.DRAFT_SAVE,
-    name: recording.draftName,
-    origins: [...recording.origins],
-    raw: { actions: recording.actions, recordedAt: new Date().toISOString() },
+    name: rec.draftName,
+    origins: rec.origins,
+    raw: { actions: rec.actions, recordedAt: new Date().toISOString() },
   }
+
   try {
-    await chrome.tabs.sendMessage(recording.tabId, { t: 'record.end' })
+    await chrome.tabs.sendMessage(rec.tabId, { t: 'record.end' })
   } catch {
-    /* tab may have gone */
+    /* the tab may have been closed or navigated away */
   }
-  send(payload)
-  recording = null
+
+  await setRecording(null)
+
+  if (isConnected()) {
+    send(payload)
+    log('draft saved:', rec.draftName, rec.actions.length, 'actions')
+  } else {
+    // Never drop a recording because the daemon happened to be down. Queue it
+    // and flush on the next connect — re-recording is the one cost the user
+    // cannot recover from.
+    const bag = await chrome.storage.session.get(PENDING_KEY)
+    const pending = bag[PENDING_KEY] ?? []
+    pending.push(payload)
+    await chrome.storage.session.set({ [PENDING_KEY]: pending })
+    log('daemon offline; queued draft:', rec.draftName)
+  }
+
   reflect({ ...state })
+  return { ok: true, actions: rec.actions.length }
 }
+
+/** Send anything recorded while the daemon was unreachable. */
+async function flushPendingDrafts() {
+  if (!isConnected()) return
+  const bag = await chrome.storage.session.get(PENDING_KEY)
+  const pending = bag[PENDING_KEY] ?? []
+  if (!pending.length) return
+  for (const payload of pending) send(payload)
+  await chrome.storage.session.remove(PENDING_KEY)
+  log('flushed', pending.length, 'queued draft(s)')
+}
+
+/**
+ * A navigation destroys the content script, which would end the recording
+ * silently mid-session. Put it back.
+ */
+chrome.tabs.onUpdated.addListener(async (tabId, info) => {
+  if (info.status !== 'complete') return
+  const rec = await getRecording()
+  if (!rec || rec.tabId !== tabId) return
+  try {
+    await injectRecorder(tabId, rec.draftName)
+    log('re-attached recorder after navigation')
+  } catch (e) {
+    log('could not re-attach recorder', e)
+  }
+})
 
 /* ---------------------------------------------------- runtime messaging */
 

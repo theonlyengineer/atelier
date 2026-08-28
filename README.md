@@ -71,7 +71,10 @@ If the page will not load at all, the daemon is not running — `npm start`, or 
 1. Open the site, click the Atelier icon, hit **Record a workflow**, name it.
 2. Do the thing once — type the prompt, click generate.
 3. When the result appears, click **Capture output**, then click the image itself.
-4. Hit **Stop**.
+4. Hit **Stop** — in the page bar or the side panel. **That is what saves it.**
+
+There is no separate save button. Stop writes the recording to the daemon and the
+panel confirms with the action count.
 
 The recording is now a *draft*, not a workflow. It needs one review pass, which Claude
 does: ask it to check drafts, and it reads the trace, picks the stable selectors, adds

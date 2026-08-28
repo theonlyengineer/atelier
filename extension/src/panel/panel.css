@@ -119,6 +119,7 @@ button:hover { border-color: var(--muted); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
 .hint { margin: 8px 2px 0; color: var(--muted); font-size: 12px; }
+.hint.done { color: var(--go); }
 
 details { border-top: 1px solid var(--line); padding-top: 12px; }
 summary {

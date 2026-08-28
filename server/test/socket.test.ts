@@ -73,6 +73,34 @@ test('state.request pushes a fresh frame on demand', async () => {
   assert.equal(state.t, 'state')
 })
 
+test('a draft.save creates a reviewable draft', async () => {
+  // This is the whole output of a recording session; if the daemon does not
+  // accept it, the user's clicking is lost with nothing to show for it.
+  await session(
+    (ws) =>
+      setTimeout(
+        () =>
+          ws.send(
+            JSON.stringify({
+              t: 'draft.save',
+              name: 'recorded-thing',
+              origins: ['https://example.test'],
+              raw: { actions: [{ kind: 'click', element: { tag: 'button' } }] },
+            }),
+          ),
+        150,
+      ),
+    (m) => m.t === 'state' && repo.listDrafts(true).some((d) => d.name === 'recorded-thing'),
+  )
+
+  const draft = repo.listDrafts(true).find((d) => d.name === 'recorded-thing')
+  assert.ok(draft, 'the draft should be listed as awaiting review')
+  const full = repo.getDraft(draft!.id)!
+  assert.equal(full.reviewed, false)
+  assert.deepEqual(full.origins, ['https://example.test'])
+  assert.equal((full.raw as any).actions.length, 1)
+})
+
 test('a connected browser unblocks a job that was waiting for one', async () => {
   const w = repo.saveWorkflow({
     name: 'sock-wf',

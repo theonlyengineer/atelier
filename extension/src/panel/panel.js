@@ -23,12 +23,13 @@ const els = {
   offlineWhy: $('offline-why'),
   retry: $('retry'),
   stamp: $('stamp'),
+  recordDone: $('record-done'),
 }
 
 /** Bumped with the manifest. Shown in the panel so "am I running the new code?"
  *  is answerable by looking, not by guessing — we mistook a stale build for a
  *  dead backend twice. */
-const PANEL_BUILD = '0.1.1'
+const PANEL_BUILD = '0.1.2'
 
 let recording = null
 let connected = false
@@ -149,8 +150,14 @@ function render(state, daemonUp, browsers = []) {
 
 function renderRecording() {
   els.record.classList.toggle('recording', !!recording)
-  els.recordLabel.textContent = recording ? `Stop “${recording.name}”` : 'Record a workflow'
+  // The count is the reassurance that actions are actually being captured —
+  // without it, a long wait for a render looks identical to a dead recorder.
+  const n = recording?.actions ?? 0
+  els.recordLabel.textContent = recording
+    ? `Stop “${recording.name}”${n ? ` · ${n} action${n === 1 ? '' : 's'}` : ''}`
+    : 'Record a workflow'
   els.recordHint.hidden = !recording
+  if (recording) els.recordDone.hidden = true
 }
 
 /* --------------------------------------------------------------- events */
@@ -159,8 +166,14 @@ els.record.onclick = async () => {
   if (recording) {
     const res = await worker({ t: 'panel.record.stop' })
     if (res?.error) return alert(`Could not stop recording: ${res.error}`)
+    const n = res?.actions ?? 0
     recording = null
     renderRecording()
+    // Saying where it went matters: a recording is not yet a workflow, and the
+    // next move is Claude's, not the user's.
+    els.recordDone.textContent =
+      `Saved ${n} action${n === 1 ? '' : 's'} as a draft. Ask Claude Code to review drafts to turn it into a workflow.`
+    els.recordDone.hidden = false
     await refresh()
     return
   }
@@ -284,6 +297,10 @@ els.retry.onclick = async () => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.t === 'panel.state') refresh()
   if (msg.t === 'panel.connection') refresh()
+  if (msg.t === 'panel.recordCount' && recording) {
+    recording.actions = msg.count
+    renderRecording()
+  }
 })
 
 ;(async () => {

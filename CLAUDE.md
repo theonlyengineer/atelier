@@ -72,6 +72,13 @@ author rule setting `display` outranks — `.banner { display: flex }` kept the 
 banner permanently on screen no matter what the JS set, and cost most of a debugging
 session. Both surfaces toggle visibility with `hidden`, so do not remove that rule.
 
+**Recording state lives in `chrome.storage.session`, never in a module variable.** MV3
+terminates the service worker after ~30s without events, and a recording session is time
+spent interacting with the *page* — for image generation, mostly spent waiting for a
+render. A module variable is gone by the time the user presses Stop, and every captured
+action goes with it, silently. The same applies to anything else that must outlive a
+single burst of activity.
+
 **No settings page.** Anything the daemon or the extension can work out — the port, the
 profile, the timeouts — is worked out. A new user-facing option needs a reason that
 survives "could this be inferred?".
