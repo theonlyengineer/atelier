@@ -68,6 +68,13 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .pill.off{color:var(--alert);border-color:var(--alert);background:var(--alert-bg)}
 
   .empty{color:var(--muted);padding:13px 15px;border:1px dashed var(--line);border-radius:11px}
+  .del{all:unset;cursor:pointer;font-size:11px;color:var(--muted);padding:3px 9px;
+       border:1px solid var(--line);border-radius:999px;white-space:nowrap}
+  .del:hover{color:var(--alert);border-color:var(--alert);background:var(--alert-bg)}
+  .draft{border-color:var(--go)}
+  .draft .pill{color:var(--go);border-color:var(--go);background:var(--go-bg)}
+  .head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:10px}
+  .head h2{margin:0}
   .empty code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px}
@@ -114,6 +121,13 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   <section>
     <h2>Browsers</h2>
     <div id="browsers"></div>
+  </section>
+
+  <section id="drafts-sec" hidden>
+    <div class="head">
+      <h2>Recordings awaiting review</h2>
+    </div>
+    <div id="drafts"></div>
   </section>
 
   <section>
@@ -190,16 +204,24 @@ function render(d) {
         '<div class="why mono">' + esc(b.profileId.slice(0, 8)) + ' · ' + esc(b.browser) + '</div></div>').join('')
     : '<div class="empty">No browser connected. Load the extension from <code>atelier/extension/</code> at <code>chrome://extensions</code>, then open any tab.</div>'
 
+  const drafts = d.drafts || []
+  $('drafts-sec').hidden = !drafts.length
+  $('drafts').innerHTML = drafts.map(x =>
+    '<div class="card draft"><div class="row"><span class="name mono">' + esc(x.name) + '</span>' +
+    '<span><span class="pill">' + x.actions + ' actions</span> ' +
+    '<button class="del" data-draft="' + esc(x.id) + '">Delete</button></span></div>' +
+    '<div class="why">Recorded ' + ago(x.createdAt) + ' on ' + esc((x.origins || []).join(', ')) +
+    '. Ask Claude Code to review drafts to turn this into a workflow.</div></div>').join('')
+
   $('workflows').innerHTML = d.workflows.length
     ? d.workflows.map(w =>
         '<div class="card"><div class="row"><span class="name mono">' + esc(w.name) + '</span>' +
-        '<span class="pill' + (w.status === 'active' ? ' on' : '') + '">' + esc(w.status) + '</span></div>' +
+        '<span><span class="pill' + (w.status === 'active' ? ' on' : '') + '">' + esc(w.status) + '</span> ' +
+        '<button class="del" data-workflow="' + esc(w.name) + '">Delete</button></span></div>' +
         '<div class="why">' + esc(w.description) + '</div>' +
         '<div class="why mono">' + w.steps + ' steps · produces ' + esc(w.produces) +
         ' · ' + esc(w.origins.join(', ')) + '</div></div>').join('')
-    : '<div class="empty">' + (d.counts.drafts
-        ? d.counts.drafts + ' recording(s) waiting for review. Ask Claude Code to check drafts.'
-        : 'Nothing recorded yet. Click <b>Record a workflow</b> in the extension side panel.') + '</div>'
+    : '<div class="empty">No workflows yet. Record one in the extension side panel; it appears above until Claude Code reviews it.</div>'
 
   $('assets-sec').hidden = !d.assets.length
   $('assets').innerHTML = d.assets.map(a =>
@@ -222,6 +244,34 @@ function render(d) {
   $('paths').innerHTML = 'State in <span class="mono">' + esc(d.home) + '</span> · ' +
     d.counts.assets + ' assets · ' + d.counts.jobs + ' jobs'
 }
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const payload = await res.json()
+  if (payload.ok === false) throw new Error(payload.error)
+  return payload.result
+}
+
+// Delegated, because the cards are re-rendered on every state frame.
+document.addEventListener('click', async (e) => {
+  const wf = e.target.dataset?.workflow
+  const dr = e.target.dataset?.draft
+  if (!wf && !dr) return
+  const what = wf ? 'workflow “' + wf + '”' : 'this recording'
+  if (!confirm('Delete ' + what + '? Assets it produced are kept.')) return
+  e.target.disabled = true
+  try {
+    if (wf) await post('/api/workflows.delete', { name: wf })
+    else await post('/api/drafts.delete', { id: dr })
+  } catch (err) {
+    alert('Could not delete: ' + err.message)
+    e.target.disabled = false
+  }
+})
 
 const source = new EventSource('/events')
 source.onmessage = (e) => { render(JSON.parse(e.data)) }

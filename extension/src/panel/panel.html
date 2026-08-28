@@ -40,6 +40,13 @@
       <p id="record-done" class="hint done" hidden></p>
     </section>
 
+    <!-- Recordings that need Claude's review. Above the workflow list because
+         this is the one thing here that is waiting on somebody. -->
+    <section id="drafts-section" hidden>
+      <h2 class="label label-go">Awaiting review</h2>
+      <ul id="drafts" class="cards"></ul>
+    </section>
+
     <!-- Everything below is reference, not action, so it is collapsed. -->
     <details id="workflows-details">
       <summary>
@@ -47,8 +54,11 @@
         <span id="workflow-count" class="count">0</span>
       </summary>
       <ul id="workflows" class="list"></ul>
-      <p id="drafts-note" class="hint" hidden></p>
     </details>
+
+    <p class="hint">
+      <a id="dashboard-link" href="#" target="_blank" rel="noopener">Open the dashboard ↗</a>
+    </p>
 
     <p id="stamp" class="stamp"></p>
 

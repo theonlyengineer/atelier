@@ -111,13 +111,50 @@
   /** Set a value the way a framework notices — React and Vue both listen for
    *  input/change rather than reading .value on their own schedule. */
   function setValue(el, value) {
+    el.focus()
+
+    // contenteditable: ChatGPT, Notion, Slack and most modern editors. Assigning
+    // textContent does not reach an editor like ProseMirror, which tracks its own
+    // document model; execCommand('insertText') produces the same event sequence
+    // as real typing, which every editor is by definition built to handle.
+    if (el.isContentEditable) {
+      const range = document.createRange()
+      range.selectNodeContents(el)
+      const sel = window.getSelection()
+      sel.removeAllRanges()
+      sel.addRange(range)
+      let inserted = false
+      try {
+        inserted = document.execCommand('insertText', false, value)
+      } catch {
+        inserted = false
+      }
+      if (!inserted) {
+        el.textContent = value
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }))
+      }
+      return
+    }
+
     const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLInputElement
     const setter = Object.getOwnPropertyDescriptor(proto.prototype, 'value')?.set
-    el.focus()
     if (setter) setter.call(el, value)
     else el.value = value
     el.dispatchEvent(new Event('input', { bubbles: true }))
     el.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  /** Turn a blob: URL into a data: URL. The service worker cannot fetch a blob
+   *  belonging to a page's context, so the page has to read it. */
+  async function inlineBlob(url) {
+    const res = await fetch(url)
+    const blob = await res.blob()
+    return await new Promise((resolve, reject) => {
+      const fr = new FileReader()
+      fr.onload = () => resolve(fr.result)
+      fr.onerror = reject
+      fr.readAsDataURL(blob)
+    })
   }
 
   window.__atelierReplay = async function replay(step) {
@@ -169,12 +206,29 @@
             if (!value.trim()) return { ok: false, reason: 'the captured element was empty', recoverable: true }
             return { ok: true, capture: { as: 'text', value } }
           }
-          const attr = step.capture?.attribute || 'src'
-          const value = el.getAttribute(attr) || el[attr]
-          if (!value) {
-            return { ok: false, reason: `the element has no ${attr} yet — it may still be generating`, recoverable: true }
+
+          // The recorded target is often a wrapper — clicking "the picture"
+          // lands on a div, and a div has no src. Find the image inside it.
+          const img =
+            el.tagName === 'IMG' ? el : el.querySelector?.('img') || el.closest?.('figure, picture')?.querySelector?.('img')
+          if (!img) {
+            return {
+              ok: false,
+              reason: 'no image inside the captured element yet — it may still be generating',
+              recoverable: true,
+            }
           }
-          return { ok: true, capture: { as: 'image', value: new URL(value, location.href).href } }
+
+          const attr = step.capture?.attribute || 'src'
+          const value = img.currentSrc || img.getAttribute(attr) || img[attr]
+          if (!value) {
+            return { ok: false, reason: `the image has no ${attr} yet — it may still be generating`, recoverable: true }
+          }
+          const href = new URL(value, location.href).href
+          if (href.startsWith('blob:')) {
+            return { ok: true, capture: { as: 'image', value: await inlineBlob(href) } }
+          }
+          return { ok: true, capture: { as: 'image', value: href } }
         }
         default:
           return { ok: false, reason: `unknown step kind "${step.kind}"`, recoverable: false }

@@ -118,12 +118,31 @@
   }
 
   const isSecret = (el) =>
-    el.tagName === 'INPUT' &&
-    ['password', 'otp'].includes((el.type || '').toLowerCase())
+    el.tagName === 'INPUT' && ['password', 'otp'].includes((el.type || '').toLowerCase())
+
+  /**
+   * Anything a human types into.
+   *
+   * contenteditable matters more than it looks: ChatGPT, Notion, Slack, and most
+   * modern editors use a contenteditable div rather than a textarea. Ignoring it
+   * meant recording a session on ChatGPT and capturing every click but not the
+   * prompt — a workflow with the one indispensable step missing.
+   */
+  const isEditable = (el) =>
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el?.isContentEditable === true
+
+  const readValue = (el) =>
+    el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+      ? el.value
+      : el.innerText
 
   function onClick(event) {
     if (!active) return
-    const el = event.target.closest('button, a, input, textarea, select, [role], [onclick], label')
+    const el = event.target.closest(
+      'button, a, input, textarea, select, [role], [onclick], label, [contenteditable]',
+    )
     if (!el || el.closest('#atelier-bar')) return
 
     if (capturing) {
@@ -131,8 +150,23 @@
       event.stopPropagation()
       capturing = false
       setCapturing(false)
-      record({ kind: 'capture', element: describe(el), capture: { as: 'image', attribute: 'src' } })
-      flash(el, '#2d7d46')
+      // Prefer the actual <img>. Clicking "the picture" usually lands on a
+      // wrapper div, and a div has no src — which produced a capture step that
+      // could never succeed.
+      const raw = event.target
+      const img =
+        (raw.tagName === 'IMG' && raw) ||
+        raw.querySelector?.('img') ||
+        raw.closest?.('figure, picture, [role="img"], div')?.querySelector?.('img') ||
+        null
+      const target = img || el
+      record({
+        kind: 'capture',
+        element: describe(target),
+        capture: { as: 'image', attribute: 'src' },
+        foundImg: !!img,
+      })
+      flash(target, '#2d7d46')
       return
     }
     record({ kind: 'click', element: describe(el) })
@@ -143,8 +177,12 @@
 
   function onInput(event) {
     if (!active) return
-    const el = event.target
-    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return
+    // A contenteditable fires input on the editable host or a descendant, so
+    // walk up to the element that actually owns the text.
+    let el = event.target
+    if (el?.nodeType === 3) el = el.parentElement
+    if (el && !isEditable(el)) el = el.closest?.('[contenteditable="true"], [contenteditable=""]') || el
+    if (!isEditable(el)) return
     if (el.closest('#atelier-bar')) return
     clearTimeout(pendingInput.get(el))
     // Debounced: one step per field, not one per keystroke.
@@ -156,8 +194,9 @@
           element: describe(el),
           // A password is never written down. The review pass turns this into a
           // `manual` step that parks the job for the human.
-          value: isSecret(el) ? null : el.value,
+          value: isSecret(el) ? null : readValue(el),
           secret: isSecret(el),
+          contentEditable: el.isContentEditable === true,
         })
         flash(el, '#1f6feb')
       }, 600),

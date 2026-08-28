@@ -17,19 +17,21 @@ const els = {
   recordHint: $('record-hint'),
   workflows: $('workflows'),
   workflowCount: $('workflow-count'),
-  draftsNote: $('drafts-note'),
   dialog: $('name-dialog'),
   nameInput: $('name-input'),
   offlineWhy: $('offline-why'),
   retry: $('retry'),
   stamp: $('stamp'),
   recordDone: $('record-done'),
+  draftsSection: $('drafts-section'),
+  drafts: $('drafts'),
+  dashboardLink: $('dashboard-link'),
 }
 
 /** Bumped with the manifest. Shown in the panel so "am I running the new code?"
  *  is answerable by looking, not by guessing — we mistook a stale build for a
  *  dead backend twice. */
-const PANEL_BUILD = '0.1.2'
+const PANEL_BUILD = '0.2.0'
 
 let recording = null
 let connected = false
@@ -140,12 +142,25 @@ function render(state, daemonUp, browsers = []) {
     els.workflows.replaceChildren(li)
   }
 
-  // Drafts are Claude's move, not the human's, so this is a note rather than a
-  // button — there is nothing here for them to click.
-  els.draftsNote.hidden = !state.drafts
-  if (state.drafts) {
-    els.draftsNote.textContent = `${state.drafts} recording${state.drafts === 1 ? '' : 's'} waiting for Claude to review. Ask it to check drafts.`
-  }
+  // Drafts are Claude's move, not the human's — so these are named, not
+  // actionable. Seeing them is the point: an unreviewed recording is invisible
+  // work, and invisible work gets re-recorded.
+  const drafts = state.draftList || []
+  els.draftsSection.hidden = drafts.length === 0
+  els.drafts.replaceChildren(
+    ...drafts.map((d) => {
+      const li = document.createElement('li')
+      li.className = 'card'
+      const title = document.createElement('div')
+      title.className = 'card-title'
+      title.textContent = d.name
+      const sub = document.createElement('div')
+      sub.className = 'card-sub'
+      sub.textContent = `${d.actions} actions · ask Claude Code to review drafts`
+      li.append(title, sub)
+      return li
+    }),
+  )
 }
 
 function renderRecording() {
@@ -265,10 +280,12 @@ async function refresh() {
   try {
     const o = await daemon('/api/overview')
     render(
-      { jobs: o.jobs, drafts: o.counts.drafts, workflows: o.workflows },
+      { jobs: o.jobs, drafts: o.counts.drafts, draftList: o.drafts, workflows: o.workflows },
       true,
       o.browsers,
     )
+    // The port is discovered, so the link cannot be a static href.
+    els.dashboardLink.href = `http://127.0.0.1:${daemonPort}/`
     els.stamp.textContent =
       `panel ${PANEL_BUILD} · daemon ${o.version} on :${daemonPort} · ` +
       `${o.browsers.length} browser${o.browsers.length === 1 ? '' : 's'} attached`

@@ -73,6 +73,20 @@ export const routes: Record<string, Handler> = {
     return { workflow: saved }
   },
 
+  '/api/workflows.delete': (b) => {
+    const name = b?.name ?? missing('name')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    repo.deleteWorkflow(w.id)
+    return { deleted: name }
+  },
+
+  '/api/drafts.delete': (b) => {
+    const id = b?.id ?? missing('id')
+    if (!repo.deleteDraft(id)) throw new Error(`no draft ${id}`)
+    return { deleted: id }
+  },
+
   '/api/workflows.run': (b, d) => {
     const name = b?.name ?? missing('name')
     const w = repo.getWorkflowByName(name)

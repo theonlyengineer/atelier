@@ -126,6 +126,18 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
       steps: w.steps.length,
     })),
     assets: repo.listAssets(12),
+    // The full list, not just a count: a recording nobody can see is a
+    // recording nobody reviews.
+    drafts: repo.listDrafts(true).map((d) => ({
+      id: d.id,
+      name: d.name,
+      origins: JSON.parse(d.origins || '[]') as string[],
+      createdAt: d.created_at,
+      actions: (() => {
+        const full = repo.getDraft(d.id)
+        return Array.isArray((full?.raw as any)?.actions) ? (full!.raw as any).actions.length : 0
+      })(),
+    })),
     counts: {
       workflows: repo.listWorkflows('active').length,
       drafts: repo.listDrafts(true).length,

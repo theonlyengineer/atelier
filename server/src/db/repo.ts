@@ -73,6 +73,25 @@ export function getWorkflow(id: string): Workflow | null {
   return r ? rowToWorkflow(r as Record<string, unknown>) : null
 }
 
+/** Deleting a workflow leaves its jobs and assets: they are history, and the
+ *  prompt that produced an image is worth keeping after the recipe is gone. */
+export function deleteWorkflow(id: string): boolean {
+  const db = open()
+  const jobs = db.prepare(`SELECT id FROM job WHERE workflow_id = ?`).all(id) as { id: string }[]
+  for (const j of jobs) {
+    db.prepare(`DELETE FROM job_event WHERE job_id = ?`).run(j.id)
+    db.prepare(`UPDATE asset SET job_id = NULL WHERE job_id = ?`).run(j.id)
+    db.prepare(`DELETE FROM job WHERE id = ?`).run(j.id)
+  }
+  const res = db.prepare(`DELETE FROM workflow WHERE id = ?`).run(id)
+  return Number(res.changes) > 0
+}
+
+export function deleteDraft(id: string): boolean {
+  const res = open().prepare(`DELETE FROM draft WHERE id = ?`).run(id)
+  return Number(res.changes) > 0
+}
+
 export function saveWorkflow(
   w: Omit<Workflow, 'id' | 'createdAt' | 'updatedAt'> & { id?: string },
 ): Workflow {

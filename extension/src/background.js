@@ -294,8 +294,9 @@ async function upload(jobId, workflowName, capture) {
     blob = new Blob([capture.value], { type: 'text/plain' })
     mime = 'text/plain'
   } else {
-    // Fetched from the service worker so cross-origin image URLs work without
-    // tainting a canvas in the page.
+    // Fetched here so cross-origin image URLs work without tainting a canvas in
+    // the page. A data: URL arrives when the page had a blob: we could not reach
+    // from this context — fetch handles both.
     const res = await fetch(capture.value)
     blob = await res.blob()
     mime = blob.type || 'image/png'
