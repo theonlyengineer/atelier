@@ -24,6 +24,23 @@ export interface ApiDeps {
 
 type Handler = (body: any, deps: ApiDeps) => unknown
 
+/**
+ * Verbs that only read. Everything else changes something, and the dashboard
+ * and side panel have to be told.
+ *
+ * Framed this way round on purpose: a new route that mutates and forgets to
+ * announce it is a control that silently does nothing, which is precisely what
+ * happened — Delete and Activate both worked and neither refreshed, so the
+ * dashboard sat on stale data until the 25-second heartbeat came round.
+ * Read-only is the exception you have to opt into.
+ */
+const READ_ONLY = new Set(['list', 'get', 'status', 'health'])
+
+export function mutates(path: string): boolean {
+  const verb = path.split('.').pop() ?? ''
+  return !READ_ONLY.has(verb)
+}
+
 const missing = (name: string) => {
   throw new Error(`${name} is required`)
 }

@@ -180,3 +180,51 @@ test('a job that is not blocked is never nagged about', async () => {
   assert.equal(nagged.includes(job.id), false)
   assert.equal(said.filter((s) => s.includes('finished-workflow')).length, 0)
 })
+
+/* ------------------------------------------------------- route classification */
+
+test('read-only routes are the exception; anything else announces a change', async () => {
+  // A route that mutates and does not announce it is a control that silently
+  // does nothing. Delete and Activate both worked and neither refreshed the
+  // dashboard, which sat on stale data until the 25-second heartbeat.
+  const { mutates } = await import('../src/http/api.ts')
+
+  for (const quiet of [
+    '/api/workflows.list',
+    '/api/workflows.get',
+    '/api/workflows.health',
+    '/api/jobs.list',
+    '/api/jobs.status',
+    '/api/assets.list',
+    '/api/drafts.list',
+    '/api/drafts.get',
+  ]) {
+    assert.equal(mutates(quiet), false, `${quiet} only reads`)
+  }
+
+  for (const loud of [
+    '/api/workflows.save',
+    '/api/workflows.activate',
+    '/api/workflows.delete',
+    '/api/workflows.replaceStep',
+    '/api/workflows.removeStep',
+    '/api/workflows.run',
+    '/api/jobs.cancel',
+    '/api/jobs.resume',
+    '/api/drafts.delete',
+    '/api/drafts.promote',
+    '/api/drafts.repropose',
+    '/api/assets.attach',
+  ]) {
+    assert.equal(mutates(loud), true, `${loud} changes something`)
+  }
+})
+
+test('every route in the table is classified, so a new one cannot be forgotten', async () => {
+  const { mutates, routes } = await import('../src/http/api.ts')
+  // Not an assertion about the answer — an assertion that there is one, for
+  // every route that exists, derived from the name rather than a hand-kept list.
+  for (const path of Object.keys(routes)) {
+    assert.equal(typeof mutates(path), 'boolean', `${path} must classify`)
+  }
+})

@@ -18,7 +18,7 @@ import { assessWorkflow } from './core/health.ts'
 import * as assets from './core/assets.ts'
 import { Hub } from './ws/hub.ts'
 import { Runner } from './core/runner.ts'
-import { routes, type ApiDeps } from './http/api.ts'
+import { mutates, routes, type ApiDeps } from './http/api.ts'
 import { dashboardHtml } from './http/dashboard.ts'
 import type { ClientMsg } from './ws/protocol.ts'
 
@@ -312,7 +312,11 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     if (route && req.method === 'POST') {
       try {
         const body = await readJson(req)
-        return json(res, 200, { ok: true, result: route(body, deps) })
+        const result = route(body, deps)
+        // Anything that changed state has to reach the dashboard and the side
+        // panel now, not on the next heartbeat.
+        if (mutates(url.pathname)) pushState()
+        return json(res, 200, { ok: true, result })
       } catch (e) {
         log(`api error ${url.pathname}: ${(e as Error).message}`)
         return json(res, 400, { ok: false, error: (e as Error).message })

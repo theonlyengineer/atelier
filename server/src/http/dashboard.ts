@@ -66,6 +66,15 @@ export const dashboardHtml = (version: string) => `<!doctype html>
         color:var(--muted);white-space:nowrap}
   .pill.on{color:var(--go);border-color:var(--go);background:var(--go-bg)}
   .pill.off{color:var(--alert);border-color:var(--alert);background:var(--alert-bg)}
+  /* Degrading, not yet broken: a state of its own, because folding it into
+     "fine" is how a workflow surprises you and folding it into "broken" is how
+     the warning gets ignored. */
+  .pill.warn{color:#d99f45;border-color:#5a4a22;background:#2a2113}
+  .go-btn{all:unset;cursor:pointer;font-size:11px;color:var(--go);padding:3px 9px;
+    border:1px solid var(--go);border-radius:4px;background:var(--go-bg)}
+  .go-btn:hover{filter:brightness(1.25)}
+  .go-btn:disabled{opacity:.4;cursor:default}
+  .steplist{margin:8px 0 0;padding-left:22px;font-size:11.5px;line-height:1.6;color:var(--muted)}
 
   .empty{color:var(--muted);padding:13px 15px;border:1px dashed var(--line);border-radius:11px}
   .del{all:unset;cursor:pointer;font-size:11px;color:var(--muted);padding:3px 9px;
@@ -180,6 +189,46 @@ function jobCard(j, alert) {
     '</div>'
 }
 
+/** A workflow, with what it is matching on now. Replay falls back through its
+ *  selector candidates silently, so a step quietly matching on position looks
+ *  identical to a healthy one — this is the only place that difference shows. */
+function workflowCard(w) {
+  const health = w.health || { state: 'unknown', summary: '', degraded: [] }
+  const pending = w.status === 'draft'
+
+  const chip = health.state === 'ok'
+    ? '<span class="pill on">healthy</span>'
+    : health.state === 'unknown'
+      ? '<span class="pill">not run yet</span>'
+      : '<span class="pill ' + (health.state === 'fragile' ? 'off' : 'warn') + '">' + esc(health.state) + '</span>'
+
+  const controls = (pending
+      ? '<button class="go-btn" data-activate="' + esc(w.name) + '">Activate</button> '
+      : '') +
+    '<button class="del" data-workflow="' + esc(w.name) + '">Delete</button>'
+
+  const degraded = (health.degraded || []).map(s =>
+    '<div class="why bad">' + esc(s.note) + ' — ' + esc(s.detail) + '</div>').join('')
+
+  const steps = pending && w.stepList
+    ? '<ol class="steplist">' + w.stepList.map(s => '<li>' + esc(s.note) + '</li>').join('') + '</ol>'
+    : ''
+
+  return '<div class="card' + (health.state === 'fragile' ? ' alert' : '') + '">' +
+    '<div class="row"><span class="name mono">' + esc(w.name) + '</span>' +
+    '<span><span class="pill' + (w.status === 'active' ? ' on' : '') + '">' + esc(w.status) + '</span> ' +
+    chip + ' ' + controls + '</span></div>' +
+    '<div class="why">' + esc(w.description) + '</div>' +
+    '<div class="why mono">' + w.steps + ' steps · produces ' + esc(w.produces) +
+    ' · ' + esc(w.origins.join(', ')) + '</div>' +
+    (health.state !== 'ok' && health.state !== 'unknown'
+      ? '<div class="why">' + esc(health.summary) + '</div>' + degraded +
+        '<div class="why">Re-record the affected step from the Atelier side panel.</div>'
+      : '') +
+    (pending ? '<div class="why">Recorded and written up. Nothing runs until you activate it.</div>' + steps : '') +
+    '</div>'
+}
+
 function render(d) {
   $('uptime').textContent = 'Listening on 127.0.0.1:' + d.port + ' · up ' + dur(d.uptimeSeconds)
 
@@ -190,7 +239,11 @@ function render(d) {
     '<div class="stat' + (blocked.length ? ' alert' : '') + '"><b>' + blocked.length + '</b><span>Needs you</span></div>' +
     '<div class="stat' + (active.length ? ' go' : '') + '"><b>' + active.length + '</b><span>Running</span></div>' +
     '<div class="stat' + (d.browsers.length ? ' go' : ' alert') + '"><b>' + d.browsers.length + '</b><span>Browsers</span></div>' +
-    '<div class="stat"><b>' + d.counts.workflows + '</b><span>Workflows</span></div>'
+    '<div class="stat"><b>' + d.counts.workflows + '</b><span>Workflows</span></div>' +
+    '<div class="stat' + ((d.unhealthy || []).length ? ' alert' : '') + '"><b>' +
+      (d.unhealthy || []).length + '</b><span>Decaying</span></div>' +
+    '<div class="stat' + ((d.pendingActivation || []).length ? ' go' : '') + '"><b>' +
+      (d.pendingActivation || []).length + '</b><span>To activate</span></div>'
 
   $('blocked-sec').hidden = !blocked.length
   $('blocked').innerHTML = blocked.map(j => jobCard(j, true)).join('')
@@ -211,17 +264,11 @@ function render(d) {
     '<span><span class="pill">' + x.actions + ' actions</span> ' +
     '<button class="del" data-draft="' + esc(x.id) + '">Delete</button></span></div>' +
     '<div class="why">Recorded ' + ago(x.createdAt) + ' on ' + esc((x.origins || []).join(', ')) +
-    '. Ask Claude Code to review drafts to turn this into a workflow.</div></div>').join('')
+    '. Kept as the record of what was captured — the workflow it produced is below.</div></div>').join('')
 
   $('workflows').innerHTML = d.workflows.length
-    ? d.workflows.map(w =>
-        '<div class="card"><div class="row"><span class="name mono">' + esc(w.name) + '</span>' +
-        '<span><span class="pill' + (w.status === 'active' ? ' on' : '') + '">' + esc(w.status) + '</span> ' +
-        '<button class="del" data-workflow="' + esc(w.name) + '">Delete</button></span></div>' +
-        '<div class="why">' + esc(w.description) + '</div>' +
-        '<div class="why mono">' + w.steps + ' steps · produces ' + esc(w.produces) +
-        ' · ' + esc(w.origins.join(', ')) + '</div></div>').join('')
-    : '<div class="empty">No workflows yet. Record one in the extension side panel; it appears above until Claude Code reviews it.</div>'
+    ? d.workflows.map(workflowCard).join('')
+    : '<div class="empty">No workflows yet. Record one from the Atelier side panel — it becomes a workflow when you save it, and appears here to activate.</div>'
 
   $('assets-sec').hidden = !d.assets.length
   $('assets').innerHTML = d.assets.map(a =>
@@ -258,6 +305,18 @@ async function post(path, body) {
 
 // Delegated, because the cards are re-rendered on every state frame.
 document.addEventListener('click', async (e) => {
+  const activate = e.target.dataset?.activate
+  if (activate) {
+    e.target.disabled = true
+    try {
+      await post('/api/workflows.activate', { name: activate })
+    } catch (err) {
+      alert('Could not activate: ' + err.message)
+      e.target.disabled = false
+    }
+    return
+  }
+
   const wf = e.target.dataset?.workflow
   const dr = e.target.dataset?.draft
   if (!wf && !dr) return
