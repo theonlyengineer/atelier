@@ -27,43 +27,84 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Atelier</title>
+<!--
+  The two house faces. Deliberately the only thing on this page that reaches the
+  network, and it is a real trade: the daemon's whole posture is that nothing
+  leaves the machine, and a font request tells Google you opened your dashboard.
+  It is here because typography is half of a visual identity and the fallbacks
+  are not close. It degrades to the system stack in one hop if the request
+  fails, so an offline dashboard still renders correctly — just not in the house
+  faces. Delete these two lines to make the page wholly self-contained.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" media="print" onload="this.media='all'"
+  href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap">
+<noscript><link rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap"></noscript>
 <style>
+  /*
+   * The house palette, taken from the public site so the tool and the thing it
+   * serves look like one hand: warm paper, hard black rules, and exactly one
+   * accent. Vermilion is the whole colour budget — which is why success here is
+   * *ink*, not green. A run that worked is unremarkable; a run that failed is
+   * the only thing worth spending the accent on.
+   */
   :root{
-    --page:#eef0f5; --panel:#fff; --sunk:#f6f7fa;
-    --ink:#14161c; --dim:#5a6070; --faint:#9aa1b1;
-    --line:#e8eaf0; --line-2:#f1f2f6;
-    --accent:#4f46e5; --accent-soft:#eeecff;
-    --ok:#1f8a4c; --ok-soft:#e6f5ec;
-    --warn:#a86a12; --warn-soft:#fdf1dd;
-    --bad:#c33b31; --bad-soft:#fdeae8;
-    --k1:#fdf3c4; --k1-ink:#7a5c05;
-    --k2:#ffe5e6; --k2-ink:#a33b3c;
-    --k3:#e9e7fd; --k3-ink:#4a3fb0;
-    --r:18px; --r-sm:12px;
+    --page:#FFFBF5;        /* warm paper — the house ground */
+    --panel:#FFFFFF;
+    --sunk:#F8F4EC;        /* the house secondary surface */
+    --ink:#000000;
+    --dim:rgb(0 0 0/68%);
+    --faint:rgb(0 0 0/46%);
+    --line:rgb(0 0 0/14%);
+    --line-2:rgb(0 0 0/8%);
+    --accent:#FE402E;
+    --accent-soft:#FFEBE7;
+    --ok:#1A1A1A;           /* success is ink: it is the baseline, not an event */
+    --ok-soft:#F1EFEA;
+    --warn:#9A6410;
+    --warn-soft:#FBF0DE;
+    --bad:#FE402E;
+    --bad-soft:#FFEBE7;
+    --k1:#F8F4EC;           /* three tones of the same paper, not three */
+    --k1-ink:#1A1A1A;       /* unrelated pastels */
+    --k2:#FFEBE7;
+    --k2-ink:#B32414;
+    --k3:#111111;
+    --k3-ink:#FFFBF5;
+    --r:10px; --r-sm:7px;
+    --serif:"Source Serif 4",ui-serif,Georgia,"Times New Roman",serif;
+    --sans:"Poppins",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-    --shadow:0 1px 2px rgb(16 20 30/4%),0 8px 24px -14px rgb(16 20 30/16%);
   }
+  /* The house style is light only. This keeps the identity rather than
+     inverting it: the paper goes warm near-black, the ink becomes the paper
+     colour, and the vermilion is untouched — it is the one thing that has to
+     read identically in both. */
   @media (prefers-color-scheme:dark){
     :root{
-      --page:#0b0d11; --panel:#14171d; --sunk:#191d24;
-      --ink:#eceff5; --dim:#a6aebc; --faint:#6d7686;
-      --line:#232830; --line-2:#1c2027;
-      --accent:#8b83ff; --accent-soft:#1e1b3a;
-      --ok:#57b47a; --ok-soft:#12241a;
-      --warn:#d59b4c; --warn-soft:#2a2013;
-      --bad:#e26a5f; --bad-soft:#2c1816;
-      --k1:#2f2a12; --k1-ink:#e5c766;
-      --k2:#2f1c1d; --k2-ink:#f0a0a1;
-      --k3:#211f3a; --k3-ink:#b3adff;
-      --shadow:0 1px 2px rgb(0 0 0/30%),0 10px 28px -16px rgb(0 0 0/70%);
+      --page:#0F0E0C; --panel:#171613; --sunk:#1E1C19;
+      --ink:#FFFBF5;
+      --dim:rgb(255 251 245/72%);
+      --faint:rgb(255 251 245/46%);
+      --line:rgb(255 251 245/15%);
+      --line-2:rgb(255 251 245/8%);
+      --accent:#FF5842; --accent-soft:#2E1512;
+      --ok:#FFFBF5; --ok-soft:#221F1B;
+      --warn:#D69A3F; --warn-soft:#2A2113;
+      --bad:#FF5842; --bad-soft:#2E1512;
+      --k1:#1E1C19; --k1-ink:#FFFBF5;
+      --k2:#2E1512; --k2-ink:#FF8272;
+      --k3:#FFFBF5; --k3-ink:#111111;
     }
   }
   *{box-sizing:border-box}
   [hidden]{display:none!important}
   html,body{height:100%}
   body{margin:0;background:var(--page);color:var(--ink);
-    font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
-    -webkit-font-smoothing:antialiased}
+    font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+  h1,h2,h3,.brand b,.kpi .big{font-family:var(--serif)}
   button{font:inherit}
   ::selection{background:var(--accent-soft)}
   .mono{font-family:var(--mono)}
@@ -78,18 +119,18 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     display:flex;flex-direction:column;gap:22px;position:sticky;top:0;height:100vh}
   @media (max-width:820px){ .side{position:static;height:auto} }
   .brand{display:flex;align-items:center;gap:10px;padding:0 8px}
-  .brand .glyph{width:26px;height:26px;border-radius:8px;background:var(--ink);color:var(--panel);
+  .brand .glyph{width:26px;height:26px;border-radius:7px;background:var(--accent);color:#fff;
     display:grid;place-items:center;font-weight:800;font-size:13px;flex:none}
   .brand b{font-size:15.5px;letter-spacing:-.01em}
   .brand span{font-family:var(--mono);font-size:10px;color:var(--faint)}
 
-  .navlabel{font-size:10px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;
+  .navlabel{font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;
     color:var(--faint);padding:0 8px;margin-bottom:-10px}
   .nav{display:flex;flex-direction:column;gap:2px}
   .nav button{all:unset;cursor:pointer;display:flex;align-items:center;gap:11px;padding:9px 10px;
     border-radius:10px;color:var(--dim);font-size:13.5px}
   .nav button:hover{background:var(--sunk);color:var(--ink)}
-  .nav button[aria-selected="true"]{background:var(--ink);color:var(--panel);font-weight:600}
+  .nav button[aria-selected="true"]{background:var(--ink);color:var(--page);font-weight:600}
   .nav svg{width:17px;height:17px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;
     stroke-linecap:round;stroke-linejoin:round}
   .nav .badge{margin-left:auto;font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;
@@ -102,7 +143,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .sidestat{margin-top:auto;background:var(--sunk);border-radius:var(--r-sm);padding:13px 14px}
   .sidestat .dotline{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12.5px}
   .sidestat i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
-  .sidestat.ok .dotline{color:var(--ok)} .sidestat.warn .dotline{color:var(--warn)}
+  .sidestat.ok .dotline{color:var(--ink)} .sidestat.warn .dotline{color:var(--warn)}
   .sidestat.bad .dotline{color:var(--bad)}
   .sidestat.ok i{animation:breathe 2.8s ease-in-out infinite}
   @keyframes breathe{0%,100%{opacity:1}50%{opacity:.3}}
@@ -113,20 +154,21 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .main{padding:24px 28px 64px;min-width:0}
   @media (max-width:560px){ .main{padding:18px 16px 48px} }
   .head{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:22px}
-  .head h1{margin:0;font-size:21px;letter-spacing:-.02em}
+  .head h1{margin:0;font-size:27px;font-weight:700;letter-spacing:-.02em;line-height:1.1}
   .head p{margin:3px 0 0;color:var(--faint);font-size:13px}
   .live{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);
     background:var(--panel);border:1px solid var(--line);padding:6px 12px;border-radius:99px}
-  .live i{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+  .live i{width:6px;height:6px;border-radius:50%;background:var(--ink)}
   .live.dead i{background:var(--bad)}
 
   section{margin-bottom:22px}
   .sec-head{display:flex;align-items:center;gap:10px;margin-bottom:11px}
-  .sec-head h2{margin:0;font-size:14.5px;letter-spacing:-.01em}
+  .sec-head h2{margin:0;font-size:12px;font-weight:700;text-transform:uppercase;
+    letter-spacing:.2em;font-family:var(--sans);color:var(--faint)}
   .sec-head .more{margin-left:auto}
 
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
-    box-shadow:var(--shadow)}
+  /* A surface is drawn with a rule, not a shadow — the house way. */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r)}
   .pad{padding:18px 20px}
 
   /* ------------------------------------------------------------ kpi --- */
@@ -139,16 +181,24 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .kpi .top{display:flex;align-items:center;gap:9px;font-weight:650;font-size:13px}
   .kpi .top svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;
     stroke-linecap:round;stroke-linejoin:round}
-  .kpi .big{font-size:33px;font-weight:750;letter-spacing:-.03em;line-height:1.15;margin-top:10px;
+  .kpi .big{font-size:38px;font-weight:700;letter-spacing:-.03em;line-height:1.1;margin-top:10px;
     font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:9px}
-  .kpi .chip{font-size:11px;font-weight:700;padding:3px 8px;border-radius:99px;
-    background:rgb(255 255 255/55%)}
-  @media (prefers-color-scheme:dark){ .kpi .chip{background:rgb(255 255 255/9%)} }
+  .kpi .chip{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;
+    background:rgb(0 0 0/8%);font-family:var(--sans)}
+  .kpi.k3 .chip{background:rgb(255 255 255/14%)}
+  @media (prefers-color-scheme:dark){
+    .kpi .chip{background:rgb(255 255 255/10%)}
+    .kpi.k3 .chip{background:rgb(0 0 0/10%)}
+  }
   .kpi .sub{font-size:12px;opacity:.78;margin-top:2px}
   .kpi .go{all:unset;cursor:pointer;margin-top:14px;align-self:flex-start;font-size:12px;
-    font-weight:600;background:rgb(255 255 255/72%);padding:7px 13px;border-radius:99px;
-    display:flex;align-items:center;gap:6px}
-  @media (prefers-color-scheme:dark){ .kpi .go{background:rgb(255 255 255/11%)} }
+    font-weight:600;background:rgb(255 255 255/80%);padding:7px 14px;border-radius:99px;
+    display:flex;align-items:center;gap:6px;color:inherit}
+  .kpi.k3 .go{background:rgb(255 255 255/13%)}
+  @media (prefers-color-scheme:dark){
+    .kpi .go{background:rgb(255 255 255/11%)}
+    .kpi.k3 .go{background:rgb(0 0 0/12%)}
+  }
   .kpi .go:hover{filter:brightness(1.05)}
 
   /* ---------------------------------------------------------- charts --- */
@@ -165,7 +215,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 
   /* ------------------------------------------------------- workflows --- */
   .wf{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
-    padding:17px 20px 17px 22px;margin-bottom:12px;box-shadow:var(--shadow);overflow:hidden}
+    padding:17px 20px 17px 22px;margin-bottom:12px;overflow:hidden}
   /* State in form as well as colour, so it survives greyscale and colour-blindness. */
   .wf::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line)}
   .wf.ok::before{background:var(--ok)} .wf.degraded::before{background:var(--warn)}
@@ -197,7 +247,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .btn{all:unset;cursor:pointer;font-size:12px;font-weight:550;padding:6px 13px;border-radius:9px;
     border:1px solid var(--line);color:var(--dim);background:var(--panel)}
   .btn:hover{color:var(--ink);border-color:var(--faint)}
-  .btn.primary{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
   .btn.primary:hover{filter:brightness(1.2)}
   .btn:disabled{opacity:.45;cursor:default}
   .row{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line-2);
@@ -209,7 +259,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     white-space:nowrap;flex:none}
   .dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint)}
   .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
-  .dot.go{background:var(--accent)}
+  .dot.go{background:var(--ink)}
   .bar{height:4px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:10px}
   .bar i{display:block;height:100%;background:var(--accent)}
   .empty{border:1px dashed var(--line);border-radius:var(--r);padding:26px;color:var(--faint);
@@ -219,8 +269,8 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   /* --------------------------------------------------------- assets --- */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(146px,1fr));gap:13px}
   .asset{all:unset;cursor:zoom-in;border-radius:var(--r-sm);overflow:hidden;background:var(--panel);
-    border:1px solid var(--line);display:flex;flex-direction:column;box-shadow:var(--shadow)}
-  .asset:hover{border-color:var(--faint)}
+    border:1px solid var(--line);display:flex;flex-direction:column}
+  .asset:hover{border-color:var(--accent)}
   .asset .thumb{aspect-ratio:4/3;background:var(--sunk);display:block;width:100%;object-fit:cover}
   .asset .cap{padding:9px 11px 11px;display:flex;flex-direction:column;gap:3px}
   .asset .cap b{font-size:12px;font-weight:550;line-height:1.4;color:var(--ink);
