@@ -225,6 +225,7 @@ function rowToAsset(r: Record<string, unknown>): Asset {
     jobId: r.job_id ? String(r.job_id) : null,
     workflowName: r.workflow_name ? String(r.workflow_name) : null,
     prompt: r.prompt ? String(r.prompt) : null,
+    description: r.description ? String(r.description) : null,
     tags: j<string[]>(r.tags, []),
     createdAt: String(r.created_at),
   }
@@ -234,8 +235,8 @@ export function createAsset(a: Omit<Asset, 'id' | 'createdAt'>): Asset {
   const id = randomUUID()
   open()
     .prepare(
-      `INSERT INTO asset (id, sha256, mime, bytes, width, height, job_id, workflow_name, prompt, tags, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO asset (id, sha256, mime, bytes, width, height, job_id, workflow_name, prompt, description, tags, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -247,6 +248,7 @@ export function createAsset(a: Omit<Asset, 'id' | 'createdAt'>): Asset {
       nz(a.jobId),
       nz(a.workflowName),
       nz(a.prompt),
+      nz(a.description),
       JSON.stringify(a.tags),
       nowIso(),
     )
@@ -428,6 +430,41 @@ export function runHistory(limitPerWorkflow = 20): Map<string, RunHistory> {
     else if (status === 'failed' || status === 'cancelled') entry.failed += 1
     if (!entry.lastAt) entry.lastAt = String(r.updated_at)
     if (entry.recent.length < limitPerWorkflow) entry.recent.unshift(status)
+  }
+  return out
+}
+
+/** Describe an asset in words. Returns the updated asset, so a caller does not
+ *  have to re-read it to confirm what stuck. */
+export function setAssetDescription(id: string, description: string | null): Asset | null {
+  open()
+    .prepare(`UPDATE asset SET description = ? WHERE id = ?`)
+    .run(description && description.trim() ? description.trim() : null, id)
+  return getAsset(id)
+}
+
+/**
+ * Runs per day, oldest first, for the last `days` days — including the days
+ * nothing ran, because a gap is information and a chart that silently omits it
+ * lies about the shape of the week.
+ */
+export function runsByDay(days = 14): Array<{ day: string; ok: number; failed: number }> {
+  const rows = open()
+    .prepare(
+      `SELECT substr(created_at, 1, 10) AS day,
+              SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS ok,
+              SUM(CASE WHEN status IN ('failed','cancelled') THEN 1 ELSE 0 END) AS failed
+         FROM job
+        GROUP BY day`,
+    )
+    .all() as Array<Record<string, unknown>>
+
+  const found = new Map(rows.map((r) => [String(r.day), { ok: Number(r.ok), failed: Number(r.failed) }]))
+  const out: Array<{ day: string; ok: number; failed: number }> = []
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10)
+    const hit = found.get(d)
+    out.push({ day: d, ok: hit?.ok ?? 0, failed: hit?.failed ?? 0 })
   }
   return out
 }

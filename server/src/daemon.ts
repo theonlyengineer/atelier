@@ -151,7 +151,8 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
       .map((w) => ({ name: w.name, ...assessWorkflow(w, repo.stepMatches(w.id)) }))
       .filter((h) => h.state === 'degraded' || h.state === 'fragile')
       .map((h) => ({ name: h.name, state: h.state, summary: h.summary })),
-    assets: repo.listAssets(12),
+    assets: repo.listAssets(60),
+    runsByDay: repo.runsByDay(14),
     // The full list, not just a count: a recording nobody can see is a
     // recording nobody reviews.
     drafts: repo.listDrafts(true).map((d) => ({

@@ -62,16 +62,22 @@ processes can reach the port.
 **`http://127.0.0.1:7717`** — the dashboard. It updates live; there is nothing to
 refresh.
 
-Four tabs, because these are four different questions asked at different moments:
-**Activity** (what is running, what just ran, which browsers are attached),
-**Workflows** (what it can do, what is decaying, what is waiting to be activated),
-**Assets**, and **Diagnostics** (the log and where state lives).
+**Overview** opens with a little of everything — health, run success and assets as three
+figures, runs over the last fortnight, outcomes, and the top of each list — so the first
+screen answers the question rather than asking which section you wanted. Then
+**Workflows**, **Runs**, **Assets** and **Log** for the detail.
 
-Two things are never behind a tab: **a parked job and a detached browser.** Those are
-the states where Atelier is stuck waiting on a person, and a status page that makes you
-go looking for them is worse than one long scroll. Each tab carries a count, so nothing
-has to be opened to be noticed, and the tab lives in the URL so a reload — or a link —
-puts you back where you were.
+Two things are never behind a section: **a parked job and a detached browser.** Those are
+the states where Atelier is stuck waiting on a person, and a status page that makes you go
+looking for them is worse than one long scroll. Counts sit on the nav so nothing has to be
+opened to be noticed, and the section lives in the URL so a reload — or a link — puts you
+back where you were.
+
+**Assets are clickable.** Full size, the prompt that made it, and a **description** you can
+write: what the asset actually *shows*, as opposed to what was asked for. That field is the
+one anything choosing between assets later has to go on — including an agent, which reads
+`list_assets` rather than the pixels — so `describe_asset` writes it and `list_assets`
+returns it.
 
 The dashboard and the extension side panel are deliberately different things. The
 **side panel** is the action surface: the one or two things that need you, in the

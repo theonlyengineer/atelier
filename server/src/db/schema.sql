@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS asset (
   job_id        TEXT REFERENCES job(id),
   workflow_name TEXT,
   prompt        TEXT,
+  description   TEXT,
   tags          TEXT NOT NULL DEFAULT '[]',
   created_at    TEXT NOT NULL
 );

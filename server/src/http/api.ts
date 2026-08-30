@@ -202,6 +202,13 @@ export const routes: Record<string, Handler> = {
     return { asset: a }
   },
 
+  '/api/assets.describe': (b) => {
+    const id = b?.id ?? missing('id')
+    const asset = repo.setAssetDescription(id, b?.description ?? null)
+    if (!asset) throw new Error(`no asset ${id}`)
+    return { asset }
+  },
+
   '/api/assets.attach': (b) => {
     const a = repo.getAsset(b?.id ?? missing('id'))
     if (!a) throw new Error(`no asset ${b.id}`)

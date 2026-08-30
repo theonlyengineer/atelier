@@ -112,6 +112,11 @@ export interface Asset {
   jobId: string | null
   workflowName: string | null
   prompt: string | null
+  /** What this asset *is*, in words. The prompt says what was asked for; this
+   *  says what came back, which is what anything reasoning about the asset
+   *  later — an agent picking one to reuse, a person scanning a grid — actually
+   *  needs. Written by whoever knows: the agent that made it, or the human. */
+  description: string | null
   tags: string[]
   createdAt: string
 }

@@ -46,7 +46,14 @@ export function probeDimensions(buf: Buffer): { width: number; height: number } 
 
 export function store(
   data: Buffer,
-  meta: { mime: string; jobId?: string | null; workflowName?: string | null; prompt?: string | null; tags?: string[] },
+  meta: {
+    mime: string
+    jobId?: string | null
+    workflowName?: string | null
+    prompt?: string | null
+    description?: string | null
+    tags?: string[]
+  },
 ): Asset {
   const sha256 = createHash('sha256').update(data).digest('hex')
   const path = blobPath(sha256)
@@ -64,6 +71,7 @@ export function store(
     jobId: meta.jobId ?? null,
     workflowName: meta.workflowName ?? null,
     prompt: meta.prompt ?? null,
+    description: meta.description ?? null,
     tags: meta.tags ?? [],
   })
 }

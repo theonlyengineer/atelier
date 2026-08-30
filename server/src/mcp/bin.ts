@@ -254,6 +254,34 @@ server.registerTool(
 /* --------------------------------------------------------------- assets */
 
 server.registerTool(
+  'describe_asset',
+  {
+    title: 'Say what an asset is',
+    description:
+      'Record, in one or two sentences, what an asset actually shows — not what was asked for. The prompt already records the request; this records the result, and it is what anything choosing between assets later has to go on, including you in a future session. Write one whenever you produce an asset worth keeping. Pass an empty description to clear it.',
+    inputSchema: {
+      id: z.string().describe('Asset id, from run_workflow or list_assets.'),
+      description: z
+        .string()
+        .max(2000)
+        .describe('What the asset shows, plainly. "A rope bridge with its middle planks missing", not "image 1".'),
+    },
+  },
+  async ({ id, description }) => {
+    try {
+      const { asset } = await call<{ asset: Asset }>('/api/assets.describe', { id, description })
+      return text(
+        asset.description
+          ? `Described ${asset.id}: ${asset.description}`
+          : `Cleared the description on ${asset.id}.`,
+      )
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
   'save_asset',
   {
     title: 'Write an asset into the repo',
@@ -279,7 +307,7 @@ server.registerTool(
   {
     title: 'List generated assets',
     description:
-      'Recently produced assets with the prompt that made each one. Use it to reuse an image instead of regenerating it, or to find something produced in an earlier session.',
+      'Recently produced assets, each with the prompt that made it and a description of what it actually is. Read the descriptions before generating anything: reusing an asset that already exists is faster, free, and keeps a set visually consistent. An asset with no description is one nobody can pick from a list — write one with describe_asset when you make it.',
     inputSchema: {
       limit: z.number().int().min(1).max(100).optional(),
       tag: z.string().optional().describe('Filter by tag; workflows tag their output with their own name.'),
@@ -292,8 +320,11 @@ server.registerTool(
       assets
         .map((a) => {
           const dims = a.width ? ` ${a.width}×${a.height}` : ''
-          const prompt = a.prompt ? `\n    ${a.prompt.slice(0, 160)}` : ''
-          return `• ${a.id}  ${a.mime}${dims}  ${a.createdAt.slice(0, 10)}${prompt}`
+          const what = a.description
+            ? `\n    ${a.description}`
+            : '\n    (no description — nobody can pick this one out of a list)'
+          const prompt = a.prompt ? `\n    prompt: ${a.prompt.slice(0, 140)}` : ''
+          return `• ${a.id}  ${a.mime}${dims}  ${a.createdAt.slice(0, 10)}${what}${prompt}`
         })
         .join('\n'),
     )
