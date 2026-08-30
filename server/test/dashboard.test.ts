@@ -415,3 +415,38 @@ test('the asset viewer fits and stays reachable at any window size', skip, async
     await page.close()
   }
 })
+
+test('success is not drawn in the colour reserved for failure', skip, async () => {
+  // The run-success card was rendered in the vermilion tint, so "92% of runs
+  // succeeded" was set in the shade that means something is wrong — worse than
+  // off-palette, it says the opposite of the number next to it.
+  const page = await open()
+
+  const c = (await page.evaluate(`(() => {
+    const root = getComputedStyle(document.documentElement)
+    const v = n => root.getPropertyValue(n).trim()
+    const card = document.querySelector('.kpi.k2')
+    const legend = [...document.querySelectorAll('.chart-legend i')].map(
+      i => getComputedStyle(i).backgroundColor)
+    return {
+      ok: v('--ok'), bad: v('--bad'), ink: v('--ink'),
+      k2bg: getComputedStyle(card).backgroundColor,
+      badSoft: v('--bad-soft'),
+      cardLabel: card.innerText,
+      legend,
+    }
+  })()`)) as Record<string, string | string[]>
+
+  assert.match(String(c.cardLabel), /Run success/, 'the k2 card is the run-success card')
+  assert.notEqual(c.ok, c.bad, 'success and failure must be distinguishable')
+  assert.notEqual(c.ok, c.ink, 'success has a colour of its own, not the body ink')
+
+  // The card must not be tinted with the failure colour.
+  const bad = String(c.badSoft).replace(/\s/g, '').toLowerCase()
+  assert.notEqual(String(c.k2bg).replace(/\s/g, '').toLowerCase(), bad)
+
+  // And the two chart swatches have to differ, or the chart says nothing.
+  const [succeeded, failed] = c.legend as string[]
+  assert.notEqual(succeeded, failed, 'succeeded and failed need different swatches')
+  await page.close()
+})

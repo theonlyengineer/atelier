@@ -45,10 +45,15 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 <style>
   /*
    * The house palette, taken from the public site so the tool and the thing it
-   * serves look like one hand: warm paper, hard black rules, and exactly one
-   * accent. Vermilion is the whole colour budget — which is why success here is
-   * *ink*, not green. A run that worked is unremarkable; a run that failed is
-   * the only thing worth spending the accent on.
+   * serves look like one hand: warm paper, hard black rules, vermilion.
+   *
+   * Plus one addition the site does not need and a dashboard does. Running on
+   * the accent alone meant success had no colour of its own, and "92% of runs
+   * succeeded" was being drawn in the shade reserved for things going wrong —
+   * which is worse than off-palette, it is the opposite of what it says. The
+   * green is deep and warm enough to sit with the paper rather than fight it,
+   * and it is still spent sparingly: a wall of successes reads at low opacity,
+   * because the thing you are scanning for is the one that failed.
    */
   :root{
     --page:#FFFBF5;        /* warm paper — the house ground */
@@ -61,16 +66,16 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     --line-2:rgb(0 0 0/8%);
     --accent:#FE402E;
     --accent-soft:#FFEBE7;
-    --ok:#1A1A1A;           /* success is ink: it is the baseline, not an event */
-    --ok-soft:#F1EFEA;
+    --ok:#256E45;           /* deep forest — warm enough for this paper */
+    --ok-soft:#E6F1E9;
     --warn:#9A6410;
     --warn-soft:#FBF0DE;
     --bad:#FE402E;
     --bad-soft:#FFEBE7;
     --k1:#F8F4EC;           /* three tones of the same paper, not three */
     --k1-ink:#1A1A1A;       /* unrelated pastels */
-    --k2:#FFEBE7;
-    --k2-ink:#B32414;
+    --k2:#E6F1E9;           /* run success is a success colour, not the alarm */
+    --k2-ink:#1C5A38;
     --k3:#111111;
     --k3-ink:#FFFBF5;
     --r:10px; --r-sm:7px;
@@ -130,7 +135,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .sidestat{margin-top:auto;background:var(--sunk);border-radius:var(--r-sm);padding:13px 14px}
   .sidestat .dotline{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12.5px}
   .sidestat i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
-  .sidestat.ok .dotline{color:var(--ink)} .sidestat.warn .dotline{color:var(--warn)}
+  .sidestat.ok .dotline{color:var(--ok)} .sidestat.warn .dotline{color:var(--warn)}
   .sidestat.bad .dotline{color:var(--bad)}
   .sidestat.ok i{animation:breathe 2.8s ease-in-out infinite}
   @keyframes breathe{0%,100%{opacity:1}50%{opacity:.3}}
@@ -145,7 +150,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .head p{margin:3px 0 0;color:var(--faint);font-size:13px}
   .live{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);
     background:var(--panel);border:1px solid var(--line);padding:6px 12px;border-radius:99px}
-  .live i{width:6px;height:6px;border-radius:50%;background:var(--ink)}
+  .live i{width:6px;height:6px;border-radius:50%;background:var(--ok)}
   .live.dead i{background:var(--bad)}
 
   section{margin-bottom:22px}
