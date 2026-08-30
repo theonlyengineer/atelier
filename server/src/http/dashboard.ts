@@ -152,7 +152,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .kpi .go:hover{filter:brightness(1.05)}
 
   /* ---------------------------------------------------------- charts --- */
-  .split{display:grid;grid-template-columns:1.55fr 1fr;gap:14px}
+  .split{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:14px}
   @media (max-width:900px){ .split{grid-template-columns:1fr} }
   .chart-legend{display:flex;gap:14px;font-size:11.5px;color:var(--faint);margin-left:auto}
   .chart-legend span{display:flex;align-items:center;gap:6px}
@@ -204,7 +204,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     font-size:13px}
   .row:last-child{border-bottom:0}
   .row .k{font-family:var(--mono);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;
-    white-space:nowrap;min-width:0}
+    white-space:nowrap;flex:1 1 auto;min-width:7ch}
   .row .when{margin-left:auto;color:var(--faint);font-size:12px;font-variant-numeric:tabular-nums;
     white-space:nowrap;flex:none}
   .dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint)}
@@ -340,7 +340,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
         </div>
       </section>
 
-      <section class="split" style="grid-template-columns:1fr 1.15fr">
+      <section class="split" style="grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)">
         <div style="min-width:0">
           <div class="sec-head"><h2>Workflows</h2>
             <button class="btn more" data-goto="workflows">See all</button></div>

@@ -300,3 +300,19 @@ test('clearing a description empties it rather than storing whitespace', skip, a
   repo.setAssetDescription(a.id, '   ')
   assert.equal(repo.getAsset(a.id)!.description, null)
 })
+
+test('a workflow name is readable in the overview, not squeezed to one letter', skip, async () => {
+  // A grid column is minmax(auto, …) by default, so a child that refuses to
+  // shrink — the horizontally-scrolling asset strip next door — eats the row and
+  // collapses its neighbour. `generate-image` rendered as "g".
+  const page = await open()
+  const names = await page.evaluate(
+    `[...document.querySelectorAll('#ov-workflows .row .k')].map(e => ({
+       text: e.textContent, width: Math.round(e.getBoundingClientRect().width) }))`,
+  )
+  assert.ok(names.length > 0, 'the overview should list workflows')
+  for (const n of names) {
+    assert.ok(n.width > 60, `"${n.text}" got ${n.width}px, which cannot show a name`)
+  }
+  await page.close()
+})
