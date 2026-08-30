@@ -90,3 +90,17 @@ CREATE TABLE IF NOT EXISTS draft (
   reviewed    INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL
 );
+
+-- What each step actually matched on, last time it ran. Replay tries selector
+-- candidates best-first and takes whichever resolves, which is what makes a
+-- workflow survive a redeploy — and also what hides one, because a step quietly
+-- matching on position looks identical to one matching on a data-testid. This
+-- is the only record of the difference.
+CREATE TABLE IF NOT EXISTS step_health (
+  workflow_id TEXT NOT NULL REFERENCES workflow(id) ON DELETE CASCADE,
+  step_id     TEXT NOT NULL,
+  strategy    TEXT NOT NULL,
+  score       INTEGER NOT NULL,
+  at          TEXT NOT NULL,
+  PRIMARY KEY (workflow_id, step_id)
+);

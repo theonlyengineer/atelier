@@ -52,3 +52,30 @@
    and not an interaction with the page. */
 html.atelier-picking, html.atelier-picking * { cursor: crosshair !important; }
 html.atelier-picking *:hover { outline: 2px solid #2d7d46 !important; }
+
+/* Save is the primary action and says so. The old bar had "Stop", and the
+   README had to explain in bold that Stop was what saved the recording — when
+   documentation has to account for the absence of a control, the control is
+   missing. */
+#atelier-bar .atelier-save {
+  background: #2d7d46;
+  color: #fff;
+}
+#atelier-bar .atelier-save:hover { background: #369252; }
+
+#atelier-bar .atelier-ghost {
+  background: transparent;
+  color: rgb(255 255 255 / 60%);
+}
+#atelier-bar .atelier-ghost:hover { color: #fff; }
+
+#atelier-bar .atelier-status {
+  font-size: 12px;
+  opacity: 0.65;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#atelier-bar .atelier-btn:disabled { opacity: 0.35; cursor: default; }

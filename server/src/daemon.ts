@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { DEFAULT_PORT, PORT_FILE, ensureDirs, LOG_FILE, HOME, blobPath } from './paths.ts'
 import { open } from './db/index.ts'
 import * as repo from './db/repo.ts'
+import { assessWorkflow } from './core/health.ts'
 import * as assets from './core/assets.ts'
 import { Hub } from './ws/hub.ts'
 import { Runner } from './core/runner.ts'
@@ -117,14 +118,34 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     })),
     jobs: repo.listJobs(['queued', 'running', 'blocked'], 20),
     recent: repo.listJobs(['done', 'failed', 'cancelled'], 8),
-    workflows: repo.listWorkflows().map((w) => ({
-      name: w.name,
-      description: w.description,
-      status: w.status,
-      produces: w.produces,
-      origins: w.origins,
-      steps: w.steps.length,
-    })),
+    workflows: repo.listWorkflows().map((w) => {
+      const health = assessWorkflow(w, repo.stepMatches(w.id))
+      return {
+        name: w.name,
+        description: w.description,
+        status: w.status,
+        produces: w.produces,
+        origins: w.origins,
+        steps: w.steps.length,
+        inputs: w.inputs,
+        // The panel needs the steps themselves to offer a repair, and the
+        // dashboard needs the health to show what is rotting.
+        stepList: w.steps.map((step) => ({ id: step.id, kind: step.kind, note: step.note ?? step.kind })),
+        health: { state: health.state, summary: health.summary, degraded: health.degraded },
+      }
+    }),
+    /** Recorded, proposed, and waiting for a human to say yes. Surfaced at the
+     *  top level so neither the panel nor Claude has to filter for it. */
+    pendingActivation: repo
+      .listWorkflows('draft')
+      .map((w) => w.name),
+    /** Still running, but matching on weaker selectors than they were recorded
+     *  with. This is the warning that arrives before the breakage. */
+    unhealthy: repo
+      .listWorkflows()
+      .map((w) => ({ name: w.name, ...assessWorkflow(w, repo.stepMatches(w.id)) }))
+      .filter((h) => h.state === 'degraded' || h.state === 'fragile')
+      .map((h) => ({ name: h.name, state: h.state, summary: h.summary })),
     assets: repo.listAssets(12),
     // The full list, not just a count: a recording nobody can see is a
     // recording nobody reviews.
@@ -346,9 +367,25 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
   writeFileSync(PORT_FILE, String(port))
   log(`atelierd ${VERSION} listening on 127.0.0.1:${port}`)
 
+  /**
+   * A parked job notifies once. If the browser was shut, or the notification
+   * was swiped past, nobody hears about it again and the job waits forever —
+   * which reads to the human as Atelier having lost their work. Say it again
+   * while it is still waiting.
+   */
+  const escalations = setInterval(() => {
+    try {
+      runner.escalateStaleBlocks()
+    } catch (e) {
+      log('escalation sweep failed', e)
+    }
+  }, 60_000)
+  escalations.unref?.()
+
   return {
     port,
     close: () => {
+      clearInterval(escalations)
       wss.close()
       server.close()
     },

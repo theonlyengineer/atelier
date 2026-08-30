@@ -14,6 +14,8 @@ server/         TypeScript, Node 22+, no native deps
     types.ts        the shared vocabulary; the extension mirrors these shapes
     db/             schema.sql + typed repo. All SQL lives here.
     core/runner.ts  the job state machine
+    core/propose.ts a recording → a workflow. Pure, deterministic, heavily tested.
+    core/health.ts  what each step is matching on now vs. as recorded
     core/assets.ts  content-addressed blob storage
     ws/             protocol + connection hub
     http/api.ts     the control API the MCP process calls
@@ -29,9 +31,14 @@ extension/      Chrome MV3, plain JS, no build step
 
 - **`npm run build`** compiles the server. The extension needs no build — reload it in
   `chrome://extensions` after editing.
-- **`npm test`** runs the unit tests with `node --experimental-strip-types` against
-  `src/`, so **no TypeScript parameter properties, enums, or namespaces** — strip-only
-  mode rejects them. Write `constructor(deps: X) { this.deps = deps }`.
+- **`npm test`** runs `check:generic` and then the tests with
+  `node --experimental-strip-types` against `src/`, so **no TypeScript parameter
+  properties, enums, or namespaces** — strip-only mode rejects them. Write
+  `constructor(deps: X) { this.deps = deps }`.
+- **`server/test/browser.test.ts` drives the content scripts in real Chrome** via
+  puppeteer-core, with a stub `chrome.runtime`. It skips itself when no Chrome is
+  installed. The recorder and the replay engine are not testable any other way, and both
+  of the worst bugs in this project's history lived in them.
 - Source uses `.ts` import specifiers; `rewriteRelativeImportExtensions` emits `.js`.
 - `ATELIER_HOME` and `ATELIER_PORT` isolate a test instance. Use them rather than
   touching `~/.atelier`.
@@ -93,3 +100,30 @@ Claude Code cannot use it consistently and will improvise. When you add a route 
 There is no automated coverage for the extension yet; it is verified by hand in Chrome.
 When changing `replay.js` or `recorder.js`, say so explicitly rather than implying the
 suite covered it.
+
+**The core stays generic, and `npm run check:generic` enforces it.** No named sites, no
+downstream paths, no one project's conventions — in code, comments, docs or MCP tool
+descriptions. This is not tidiness. `run_workflow`'s input description once instructed
+every session to prepend a style guide from a path that existed in a single downstream
+project, so every other user of Atelier was pointed at a file that was not there. The
+logic was generic; the words around it had drifted, which is how this always happens.
+Describe the class of thing, not the product.
+
+**A recording becomes a workflow in `core/propose.ts`, not in a conversation.** The
+rules — order the selectors, keep every candidate, collapse repeated typing, parameterise
+the longest value, insert the wait before a capture and the wait after its trigger — are
+fixed, so they belong in code where they are deterministic and tested. Never move a
+proposal decision back into a prompt.
+
+**A proposal is saved `status: 'draft'` and only a human activates it.** Nothing else in
+the system sets a workflow to `active`. A recording that could run the moment it stopped
+is a recording nobody checked.
+
+**Replay reports which selector candidate resolved, and it must keep doing so.** The
+fallback list is what makes a workflow survive a redeploy and also what hides one. That
+one field on `step.ok` is the entire early-warning system; a refactor that drops it
+removes the only signal that a workflow is dying.
+
+**Never build a selector from an element's current value.** It changes between runs, so
+the selector is wrong by construction — and on a password field it writes the secret into
+the workflow. See `docs/security.md`.

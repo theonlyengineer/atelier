@@ -24,7 +24,7 @@ server.registerTool(
   {
     title: 'Is Atelier ready',
     description:
-      'Whether the daemon is running and whether a browser is attached to it. Check this before run_workflow: a workflow with no browser attached parks immediately and waits for a human, which is slower than telling them up front. Also reports counts of workflows, drafts, jobs and assets.',
+      'Whether the daemon is running and whether a browser is attached to it. Check this before run_workflow: a workflow with no browser attached parks immediately and waits for a human, which is slower than telling them up front. Also reports counts, anything waiting on a human, and any workflow whose selectors have decayed since it was recorded.',
     inputSchema: {},
   },
   async () => {
@@ -42,6 +42,14 @@ server.registerTool(
           (blocked.length
             ? `\n\nBlocked and waiting for a human:\n` +
               blocked.map((j: any) => `  ${j.workflowName}: ${j.blockedReason}`).join('\n')
+            : '') +
+          (o.pendingActivation?.length
+            ? `\n\nRecorded and awaiting the human's confirmation in the side panel:\n` +
+              o.pendingActivation.map((n: string) => `  ${n}`).join('\n')
+            : '') +
+          (o.unhealthy?.length
+            ? `\n\nDecaying — still running, but matching on weaker selectors than recorded:\n` +
+              o.unhealthy.map((w: any) => `  ${w.name}: ${w.summary}`).join('\n')
             : ''),
       )
     } catch (e) {
@@ -66,14 +74,16 @@ server.registerTool(
     })
     if (!workflows.length) {
       return text(
-        'No active workflows. The human records one by clicking "Record a workflow" in the Atelier side panel, then it needs a review pass (list_drafts).',
+        'No active workflows. The human records one by clicking "Record a workflow" in the Atelier side panel; Atelier turns the recording into a workflow by itself, and they confirm it there. Nothing is needed from you.',
       )
     }
     const lines = workflows.map((w) => {
       const inputs = w.inputs.length
         ? w.inputs.map((i: any) => `${i.name}${i.required ? '' : '?'}`).join(', ')
         : '(none)'
-      return `• ${w.name} — ${w.description}\n    produces: ${w.produces}   inputs: ${inputs}   steps: ${w.steps}`
+      const health = w.health?.state && w.health.state !== 'ok' ? `   health: ${w.health.state}` : ''
+      const pending = w.status === 'draft' ? '   [awaiting activation in the side panel]' : ''
+      return `• ${w.name} — ${w.description}\n    produces: ${w.produces}   inputs: ${inputs}   steps: ${w.steps}${health}${pending}`
     })
     return text(lines.join('\n'))
   },
@@ -308,6 +318,94 @@ server.registerTool(
   },
 )
 
+/* --------------------------------------------------------------- health */
+
+server.registerTool(
+  'workflow_health',
+  {
+    title: 'Is a workflow still finding things the way it was recorded',
+    description:
+      'Per-step report of which selector each step is actually matching on, compared with the one it was recorded against. Replay falls back through candidates silently, so a workflow can degrade from a stable test id to a positional XPath and keep working right up until it does not. This is how you see that coming. Call it when a workflow starts behaving oddly, before a run that matters, or when the human asks whether anything needs maintenance.',
+    inputSchema: {
+      name: z.string().optional().describe('One workflow. Omit for all of them.'),
+    },
+  },
+  async ({ name }) => {
+    try {
+      const { workflows } = await call<{ workflows: any[] }>('/api/workflows.health', name ? { name } : {})
+      if (!workflows.length) return text('No workflows to report on.')
+      return text(
+        workflows
+          .map((w) => {
+            const head = `${w.name} — ${w.state.toUpperCase()}: ${w.summary}`
+            if (!w.degraded.length) return head
+            return (
+              head +
+              '\n' +
+              w.degraded.map((s: any) => `    ${s.state}: ${s.note} — ${s.detail}`).join('\n')
+            )
+          })
+          .join('\n\n'),
+      )
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
+  'repair_step',
+  {
+    title: 'Fix one step of a workflow',
+    description:
+      "Replace one step's selectors, typed value, wait or timeout, leaving the rest of the workflow alone. The repair path for a workflow whose page moved — re-recording twenty steps to fix one is the thing this avoids. Health for that step is cleared, since a match recorded against the old selectors says nothing about the new ones. If the element cannot be identified from what you know, ask the human to re-record just that step from the side panel instead of guessing a selector.",
+    inputSchema: {
+      name: z.string().describe('Workflow name.'),
+      stepId: z.string().describe('Step id, from workflow_health or get_workflow.'),
+      step: z
+        .object({
+          selectors: z
+            .array(z.object({ strategy: z.string(), value: z.string(), score: z.number() }))
+            .optional(),
+          value: z.string().optional(),
+          timeoutMs: z.number().int().optional(),
+          note: z.string().optional(),
+        })
+        .describe('Only the fields you are changing.'),
+    },
+  },
+  async ({ name, stepId, step }) => {
+    try {
+      const { workflow } = await call<{ workflow: Workflow }>('/api/workflows.replaceStep', {
+        name,
+        stepId,
+        step,
+      })
+      return text(`Updated step ${stepId} in "${workflow.name}". Its health is now unverified until the next run.`)
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
+  'get_workflow',
+  {
+    title: 'Read a workflow in full',
+    description:
+      'Every step of a workflow with its selectors, waits and ids, plus its current health. Read this before repair_step — you need the step id, and you need to see what the step is doing before changing how it finds things.',
+    inputSchema: { name: z.string() },
+  },
+  async ({ name }) => {
+    try {
+      const res = await call<{ workflow: Workflow; health: any }>('/api/workflows.get', { name })
+      return text(JSON.stringify(res, null, 2))
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
 /* ------------------------------------------------- recording → workflow */
 
 server.registerTool(
@@ -315,7 +413,7 @@ server.registerTool(
   {
     title: 'List recordings awaiting review',
     description:
-      'Raw browser recordings the human has made that are not yet runnable workflows. Each needs a review pass: read it with get_draft, then promote_draft. Check this when the human says they recorded something.',
+      'Raw browser recordings, kept as the record of what was actually captured. A recording is turned into a workflow automatically when it is saved and the human confirms it in the side panel, so this is for inspection and recovery — not a queue you are expected to work through. Reach for it when a workflow came out wrong and you want to see what the recorder actually saw.',
     inputSchema: {},
   },
   async () => {
@@ -332,7 +430,7 @@ server.registerTool(
   {
     title: 'Read a recording',
     description:
-      'The raw captured action trace, with every selector candidate the recorder found per element. Read this, then call promote_draft with a cleaned-up workflow: pick the most stable selector for each step, add waits where the page needs time (especially after the action that triggers generation), replace recorded input text with {{placeholders}}, and drop steps that were incidental clicking.',
+      'The raw captured action trace, with every selector candidate the recorder found per element. Use it to diagnose a workflow that came out wrong: compare what was recorded against what the proposal made of it. The proposal rules are fixed and deterministic, so if the trace is right and the workflow is not, the rules are the bug.',
     inputSchema: { id: z.string() },
   },
   async ({ id }) => {
@@ -385,7 +483,7 @@ server.registerTool(
   {
     title: 'Turn a recording into a workflow',
     description:
-      'Save a reviewed recording as a runnable workflow and mark the draft done. Keep more than one selector per step where the recorder found alternatives — replay tries them in score order, and that is what makes a workflow survive a redeploy of the site.',
+      'Overwrite the workflow a recording produced, with one you have written yourself. Rarely needed — a recording is proposed automatically on save. Use it when the automatic proposal got something wrong that you cannot fix with repair_step. Keep more than one selector per step: replay tries them in score order, and that list is what makes a workflow survive a redeploy.',
     inputSchema: { draftId: z.string(), workflow: workflowSchema },
   },
   async ({ draftId, workflow }) => {
@@ -424,7 +522,7 @@ server.registerTool(
   {
     title: 'Write a workflow by hand',
     description:
-      'Create or replace a workflow without a recording. Use it to fix a step in an existing workflow, or for a site simple enough to describe directly. Prefer promote_draft when a recording exists — the recorder captures selectors you cannot guess.',
+      'Create or replace a whole workflow by hand, with no recording. For a site simple enough to describe directly. To fix one step of an existing workflow prefer repair_step, and to change how it finds an element prefer having the human re-record that step — the recorder captures selector candidates you cannot guess.',
     inputSchema: { workflow: workflowSchema },
   },
   async ({ workflow }) => {

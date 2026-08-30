@@ -4,7 +4,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { open, nowIso } from './index.ts'
-import type { Asset, Job, JobStatus, Workflow, WorkflowStatus } from '../types.ts'
+import type { Asset, Job, JobStatus, Step, Workflow, WorkflowStatus } from '../types.ts'
+import type { StepMatch } from '../core/health.ts'
 
 /** node:sqlite rejects `undefined`; JSON round-trips turn absent fields into it. */
 const nz = <T>(v: T | undefined | null): T | null => (v === undefined ? null : v)
@@ -312,4 +313,73 @@ export function getDraft(id: string) {
 
 export function markDraftReviewed(id: string): void {
   open().prepare(`UPDATE draft SET reviewed = 1 WHERE id = ?`).run(id)
+}
+
+/* ------------------------------------------------------------ step health */
+
+/** Record which selector candidate actually resolved. Called on every step ack,
+ *  so it is an upsert rather than a log — the question is "what is it matching
+ *  on now", not "what has it ever matched on". */
+export function recordStepMatch(
+  workflowId: string,
+  stepId: string,
+  strategy: string,
+  score: number,
+): void {
+  open()
+    .prepare(
+      `INSERT INTO step_health (workflow_id, step_id, strategy, score, at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(workflow_id, step_id) DO UPDATE SET
+         strategy = excluded.strategy,
+         score = excluded.score,
+         at = excluded.at`,
+    )
+    .run(workflowId, stepId, strategy, Math.round(score), nowIso())
+}
+
+export function stepMatches(workflowId: string): StepMatch[] {
+  const rows = open()
+    .prepare(`SELECT step_id, strategy, score, at FROM step_health WHERE workflow_id = ?`)
+    .all(workflowId) as Array<Record<string, unknown>>
+  return rows.map((r) => ({
+    stepId: String(r.step_id),
+    strategy: String(r.strategy) as StepMatch['strategy'],
+    score: Number(r.score),
+    at: String(r.at),
+  }))
+}
+
+/** Forget what a step used to match on. Called when its selectors are replaced,
+ *  because a match recorded against the old selectors says nothing about the
+ *  new ones. */
+export function clearStepMatch(workflowId: string, stepId: string): void {
+  open().prepare(`DELETE FROM step_health WHERE workflow_id = ? AND step_id = ?`).run(workflowId, stepId)
+}
+
+/* ------------------------------------------------------------ step edits */
+
+/** Replace one step in place, keeping its position and its id. This is the
+ *  repair path: a workflow whose page moved needs one step fixed, not a
+ *  re-recording of the whole thing. */
+export function replaceStep(workflowId: string, stepId: string, next: Partial<Step>): Workflow {
+  const wf = getWorkflow(workflowId)
+  if (!wf) throw new Error(`no workflow ${workflowId}`)
+  const index = wf.steps.findIndex((s) => s.id === stepId)
+  if (index === -1) throw new Error(`workflow "${wf.name}" has no step ${stepId}`)
+  const merged: Step = { ...wf.steps[index]!, ...next, id: stepId }
+  const steps = [...wf.steps]
+  steps[index] = merged
+  clearStepMatch(workflowId, stepId)
+  return saveWorkflow({ ...wf, steps })
+}
+
+export function removeStep(workflowId: string, stepId: string): Workflow {
+  const wf = getWorkflow(workflowId)
+  if (!wf) throw new Error(`no workflow ${workflowId}`)
+  const steps = wf.steps.filter((s) => s.id !== stepId)
+  if (steps.length === wf.steps.length) throw new Error(`workflow "${wf.name}" has no step ${stepId}`)
+  if (steps.length === 0) throw new Error('a workflow needs at least one step')
+  clearStepMatch(workflowId, stepId)
+  return saveWorkflow({ ...wf, steps })
 }

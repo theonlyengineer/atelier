@@ -60,7 +60,16 @@
     return style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0'
   }
 
-  /** Try every candidate, best score first, until one resolves to a visible node. */
+  /**
+   * Try every candidate, best score first, until one resolves to a visible node.
+   *
+   * Returns *which* candidate won as well as the element. That second half is
+   * the whole point: the fallback list is what lets a workflow survive a
+   * redeploy, and it is also what hides one — a step quietly matching on a
+   * positional XPath looks identical to one matching on the data-testid it was
+   * recorded with, until the position moves too. Reporting the winner is how
+   * the daemon can warn before that happens.
+   */
   async function find(selectors, timeoutMs) {
     const ordered = [...(selectors || [])].sort((a, b) => b.score - a.score)
     const deadline = Date.now() + timeoutMs
@@ -68,13 +77,16 @@
     while (Date.now() < deadline) {
       for (const candidate of ordered) {
         const el = resolveOne(candidate)
-        if (el && visible(el)) return el
-        if (el) last = el
+        if (el && visible(el)) return { el, matched: candidate }
+        if (el) last = { el, matched: candidate }
       }
       await sleep(120)
     }
     return last
   }
+
+  /** Some callers only want the node. */
+  const nodeOf = (hit) => hit?.el ?? null
 
   async function waitFor(condition, timeoutMs) {
     if (!condition) return true
@@ -82,12 +94,12 @@
     while (Date.now() < deadline) {
       switch (condition.kind) {
         case 'visible': {
-          const el = await find(condition.selectors, 200)
+          const el = nodeOf(await find(condition.selectors, 200))
           if (el && visible(el)) return true
           break
         }
         case 'hidden': {
-          const el = await find(condition.selectors, 200)
+          const el = nodeOf(await find(condition.selectors, 200))
           if (!el || !visible(el)) return true
           break
         }
@@ -165,8 +177,11 @@
       }
 
       let el = null
+      let matched = null
       if (step.selectors?.length) {
-        el = await find(step.selectors, step.timeoutMs)
+        const hit = await find(step.selectors, step.timeoutMs)
+        el = nodeOf(hit)
+        matched = hit?.matched ?? null
         if (!el) {
           return {
             ok: false,
@@ -205,7 +220,7 @@
           if (as === 'text') {
             const value = el.value ?? el.textContent ?? ''
             if (!value.trim()) return { ok: false, reason: 'the captured element was empty', recoverable: true }
-            return { ok: true, capture: { as: 'text', value } }
+            return { ok: true, matched, capture: { as: 'text', value } }
           }
 
           // The recorded target is often a wrapper — clicking "the picture"
@@ -227,9 +242,9 @@
           }
           const href = new URL(value, location.href).href
           if (href.startsWith('blob:')) {
-            return { ok: true, capture: { as: 'image', value: await inlineBlob(href) } }
+            return { ok: true, matched, capture: { as: 'image', value: await inlineBlob(href) } }
           }
-          return { ok: true, capture: { as: 'image', value: href } }
+          return { ok: true, matched, capture: { as: 'image', value: href } }
         }
         default:
           return { ok: false, reason: `unknown step kind "${step.kind}"`, recoverable: false }
@@ -238,7 +253,7 @@
       if (!(await waitFor(step.waitAfter, step.timeoutMs))) {
         return { ok: false, reason: 'the expected result never appeared after this step', recoverable: true }
       }
-      return { ok: true }
+      return { ok: true, matched }
     } catch (e) {
       return { ok: false, reason: e?.message || String(e), recoverable: true }
     }

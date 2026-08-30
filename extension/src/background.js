@@ -30,14 +30,11 @@ async function identity() {
     // A label the human recognises in the daemon log and in "waiting for X"
     // messages. Chrome's signed-in email is the best automatic guess; the point
     // is that nobody has to type it.
-    let email = ''
-    try {
-      const info = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' })
-      email = info?.email || ''
-    } catch {
-      /* identity.email not granted, or no signed-in profile */
-    }
-    label = email || 'this browser'
+    // Deliberately not the signed-in email. Reading that needs the
+    // `identity.email` permission, which is a real privacy ask for a label
+    // nobody strictly needs — and an unused-looking permission is the first
+    // thing anyone reviewing this extension will question.
+    label = `Chrome (${new Date().toISOString().slice(0, 10)})`
     await chrome.storage.local.set({ profileId, label })
   }
   return { profileId, label }
@@ -236,6 +233,21 @@ function waitForLoad(tabId, timeoutMs = 30000) {
 
 async function runStep({ jobId, stepIndex, step, origins, workflowName }) {
   try {
+    // The daemon enforces the allowlist, but the browser enforces the grant,
+    // and the grant is now per origin rather than the whole web. A workflow
+    // whose site was never approved parks with something the human can act on
+    // instead of failing somewhere inside chrome.scripting.
+    if (!(await hasOrigins(origins))) {
+      send({
+        t: MSG.STEP_FAIL,
+        jobId,
+        stepIndex,
+        reason: `Atelier has not been given access to ${origins.join(', ')} — open the side panel and grant it, then resume`,
+        recoverable: true,
+      })
+      return
+    }
+
     const tab = await targetTab(origins)
 
     if (step.kind === 'navigate') {
@@ -274,7 +286,17 @@ async function runStep({ jobId, stepIndex, step, origins, workflowName }) {
       await upload(jobId, workflowName, result.capture)
     }
 
-    send({ t: MSG.STEP_OK, jobId, stepIndex })
+    send({
+      t: MSG.STEP_OK,
+      jobId,
+      stepIndex,
+      // Which selector actually resolved. The daemon compares it against the
+      // one this step was recorded with; that difference is the only warning
+      // anyone gets before a workflow stops working.
+      ...(result.matched
+        ? { matched: { strategy: result.matched.strategy, score: result.matched.score } }
+        : {}),
+    })
   } catch (e) {
     send({
       t: MSG.STEP_FAIL,
@@ -312,6 +334,64 @@ async function upload(jobId, workflowName, capture) {
   })
 }
 
+/* ----------------------------------------------------------- permissions */
+
+/**
+ * Atelier no longer asks for every site up front.
+ *
+ * The origin allowlist has always been enforced by the daemon, but the manifest
+ * still requested <all_urls>, so the browser had granted the extension the whole
+ * web regardless — and the permission prompt is what a careful person actually
+ * reads. Now the grant is requested per origin, at the moment the human points
+ * at that site, and Chrome enforces what the security document promises.
+ */
+const originPattern = (origin) => {
+  try {
+    return `${new URL(origin).origin}/*`
+  } catch {
+    return null
+  }
+}
+
+async function hasOrigins(origins) {
+  const patterns = origins.map(originPattern).filter(Boolean)
+  if (!patterns.length) return false
+  return chrome.permissions.contains({ origins: patterns })
+}
+
+/** Ask for the origins a workflow needs. Must be called from a user gesture, so
+ *  this is only ever reached from the panel or the page bar. */
+async function requestOrigins(origins) {
+  const patterns = origins.map(originPattern).filter(Boolean)
+  if (!patterns.length) return false
+  try {
+    return await chrome.permissions.request({ origins: patterns })
+  } catch {
+    return false
+  }
+}
+
+/* -------------------------------------------------------- daemon (HTTP) */
+
+/** The panel drives some things through the daemon's control API rather than
+ *  the socket — anything that wants a reply the caller can act on. */
+async function daemon(path, body) {
+  if (!port) port = await probePort()
+  if (!port) return { error: 'the Atelier daemon is not running' }
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    })
+    const payload = await res.json()
+    if (!res.ok || payload.ok === false) return { error: payload.error || `daemon returned ${res.status}` }
+    return { ok: true, result: payload.result }
+  } catch (e) {
+    return { error: String(e?.message || e) }
+  }
+}
+
 /* ------------------------------------------------------------- recording */
 
 /**
@@ -337,22 +417,106 @@ async function setRecording(rec) {
   else await chrome.storage.session.remove(REC_KEY)
 }
 
-async function injectRecorder(tabId, draftName) {
+async function injectRecorder(tabId, draftName, mode = 'workflow', count = 0) {
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ['src/content/recorder.js'],
   })
   await chrome.scripting.insertCSS({ target: { tabId }, files: ['src/content/overlay.css'] })
-  await chrome.tabs.sendMessage(tabId, { t: 'record.begin', draftName })
+  await chrome.tabs.sendMessage(tabId, { t: 'record.begin', draftName, mode, count })
 }
 
 async function startRecording(draftName) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (!tab?.id) throw new Error('no active tab')
-  await setRecording({ draftName, tabId: tab.id, actions: [], origins: [] })
-  await injectRecorder(tab.id, draftName)
+  const origin = originOf(tab.url)
+  if (!origin) throw new Error('this page cannot be recorded — open the site you want to automate first')
+
+  // Ask for this one origin, now, while we are inside the click that started
+  // the recording. Recording a site we are not allowed to replay on would
+  // produce a workflow that can never run.
+  if (!(await hasOrigins([origin])) && !(await requestOrigins([origin]))) {
+    throw new Error(`Atelier needs permission for ${origin} to record here`)
+  }
+
+  await setRecording({ draftName, tabId: tab.id, actions: [], origins: [origin], mode: 'workflow' })
+  await injectRecorder(tab.id, draftName, 'workflow', 0)
   log('recording started:', draftName)
   reflect({ ...state })
+}
+
+const originOf = (url) => {
+  try {
+    const o = new URL(url).origin
+    return o.startsWith('http') ? o : null
+  } catch {
+    return null
+  }
+}
+
+/** Re-record one step of an existing workflow, in place. The repair path: a page
+ *  that moved needs one step fixed, not twenty re-recorded. */
+async function startStepRecording(workflowName, stepId) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  if (!tab?.id) return { error: 'no active tab' }
+  const origin = originOf(tab.url)
+  if (!origin) return { error: 'open the workflow\'s site in this tab first' }
+  if (!(await hasOrigins([origin])) && !(await requestOrigins([origin]))) {
+    return { error: `Atelier needs permission for ${origin}` }
+  }
+  await setRecording({
+    draftName: workflowName,
+    tabId: tab.id,
+    actions: [],
+    origins: [origin],
+    mode: 'step',
+    workflowName,
+    stepId,
+  })
+  await injectRecorder(tab.id, workflowName, 'step', 0)
+  reflect({ ...state })
+  return { ok: true }
+}
+
+/** Splice the single re-recorded action into the workflow and stand down. */
+async function finishStepRecording() {
+  const rec = await getRecording()
+  if (!rec || rec.mode !== 'step') return { error: 'no step recording in progress' }
+  const action = rec.actions[rec.actions.length - 1]
+  await setRecording(null)
+  reflect({ ...state })
+  if (!action) return { error: 'nothing was captured' }
+  send({ t: MSG.STEP_RERECORD, workflowName: rec.workflowName, stepId: rec.stepId, action })
+  log('re-recorded step', rec.stepId, 'of', rec.workflowName)
+  return { ok: true }
+}
+
+/** Throw a recording away. Its own control, because the alternative — saving
+ *  something you did not mean to keep and deleting it afterwards — leaves a
+ *  half-made workflow in the list in the meantime. */
+async function discardRecording() {
+  const rec = await getRecording()
+  if (!rec) return { error: 'no recording in progress' }
+  try {
+    await chrome.tabs.sendMessage(rec.tabId, { t: 'record.end' })
+  } catch {
+    /* tab closed or navigated */
+  }
+  await setRecording(null)
+  reflect({ ...state })
+  log('recording discarded:', rec.draftName)
+  return { ok: true, discarded: rec.actions.length }
+}
+
+/** Remove the last thing recorded. A recorder that cannot take something back
+ *  makes you restart from the beginning over one stray click. */
+async function undoLastAction() {
+  const rec = await getRecording()
+  if (!rec) return 0
+  rec.actions.pop()
+  await setRecording(rec)
+  chrome.runtime.sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions } }).catch(() => {})
+  return rec.actions.length
 }
 
 async function addAction(action) {
@@ -361,10 +525,16 @@ async function addAction(action) {
   rec.actions.push(action)
   if (action.origin && !rec.origins.includes(action.origin)) rec.origins.push(action.origin)
   await setRecording(rec)
+  // Push the whole list, not a count. A recorder that only tells you how many
+  // things it heard cannot tell you it heard the wrong thing — which is how two
+  // recordings came back missing the step that mattered.
+  chrome.runtime
+    .sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions, mode: rec.mode } })
+    .catch(() => {})
   return rec.actions.length
 }
 
-async function stopRecording() {
+async function saveRecording() {
   const rec = await getRecording()
   if (!rec) {
     log('stop requested with no recording in progress')
@@ -424,7 +594,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   const rec = await getRecording()
   if (!rec || rec.tabId !== tabId) return
   try {
-    await injectRecorder(tabId, rec.draftName)
+    await injectRecorder(tabId, rec.draftName, rec.mode ?? 'workflow', rec.actions.length)
     log('re-attached recorder after navigation')
   } catch (e) {
     log('could not re-attach recorder', e)
@@ -471,9 +641,12 @@ async function route(msg, sendResponse) {
       // The daemon only pushes state on change, so a panel opened during a
       // quiet period would otherwise render the worker's stale cache.
       if (isConnected()) send({ t: MSG.STATE_REQUEST })
+      // Read from session storage, not a module variable: the worker may have
+      // been recycled since the recording started.
+      const rec = await getRecording()
       sendResponse({
         state,
-        recording: recording ? { name: recording.draftName } : null,
+        recording: rec ? { name: rec.draftName, actions: rec.actions, mode: rec.mode ?? 'workflow' } : null,
         connected: isConnected(),
         port,
       })
@@ -492,21 +665,46 @@ async function route(msg, sendResponse) {
       sendResponse({ ok: true })
       break
     case 'panel.record.stop':
-      await stopRecording()
-      sendResponse({ ok: true })
+      sendResponse(await saveRecording())
       break
-    case 'record.action':
-      if (recording) {
-        recording.actions.push(msg.action)
-        if (msg.action.origin) recording.origins.add(msg.action.origin)
-        chrome.runtime.sendMessage({ t: 'panel.recordCount', count: recording.actions.length }).catch(() => {})
-      }
-      sendResponse({ ok: true })
+    case 'record.action': {
+      // addAction persists to session storage. It used to be dead code behind a
+      // module variable that did not exist, which meant every recorded action
+      // threw and was silently dropped — the recording always came back empty.
+      const total = await addAction(msg.action)
+      sendResponse({ ok: true, count: total })
       break
-    case 'record.stopFromPage':
-      await stopRecording()
-      sendResponse({ ok: true })
+    }
+    case 'record.undo': {
+      const total = await undoLastAction()
+      sendResponse({ ok: true, count: total })
       break
+    }
+    case 'record.saveFromPage':
+      sendResponse(await saveRecording())
+      break
+    case 'record.discardFromPage':
+      sendResponse(await discardRecording())
+      break
+    case 'record.stepDone':
+      sendResponse(await finishStepRecording())
+      break
+    case 'panel.record.discard':
+      sendResponse(await discardRecording())
+      break
+    case 'panel.step.rerecord':
+      sendResponse(await startStepRecording(msg.workflowName, msg.stepId))
+      break
+    case 'panel.workflow.activate': {
+      const res = await daemon('/api/workflows.activate', { name: msg.name })
+      sendResponse(res)
+      break
+    }
+    case 'panel.workflow.removeStep': {
+      const res = await daemon('/api/workflows.removeStep', { name: msg.name, stepId: msg.stepId })
+      sendResponse(res)
+      break
+    }
     default:
       sendResponse({ ok: false })
   }

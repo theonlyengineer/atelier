@@ -9,6 +9,8 @@ import type { Runner } from '../core/runner.ts'
 import type { Hub } from '../ws/hub.ts'
 import * as repo from '../db/repo.ts'
 import * as assets from '../core/assets.ts'
+import { assessWorkflow } from '../core/health.ts'
+import { proposeWorkflow } from '../core/propose.ts'
 import type { Workflow } from '../types.ts'
 
 export interface ApiDeps {
@@ -42,22 +44,86 @@ export const routes: Record<string, Handler> = {
   '/api/workflows.list': (b) => {
     const all = repo.listWorkflows(b?.status)
     return {
-      workflows: all.map((w) => ({
-        name: w.name,
-        description: w.description,
-        status: w.status,
-        produces: w.produces,
-        inputs: w.inputs,
-        origins: w.origins,
-        steps: w.steps.length,
-      })),
+      workflows: all.map((w) => {
+        const health = assessWorkflow(w, repo.stepMatches(w.id))
+        return {
+          name: w.name,
+          description: w.description,
+          status: w.status,
+          produces: w.produces,
+          inputs: w.inputs,
+          origins: w.origins,
+          steps: w.steps.length,
+          health: { state: health.state, summary: health.summary, degraded: health.degraded.length },
+        }
+      }),
     }
   },
 
   '/api/workflows.get': (b) => {
     const w = repo.getWorkflowByName(b?.name ?? missing('name'))
     if (!w) throw new Error(`no workflow named ${b.name}`)
-    return { workflow: w }
+    return { workflow: w, health: assessWorkflow(w, repo.stepMatches(w.id)) }
+  },
+
+  /** Full health detail, step by step. Separate from workflows.get because the
+   *  common question is "is anything rotting", not "show me every step". */
+  '/api/workflows.health': (b) => {
+    if (b?.name) {
+      const w = repo.getWorkflowByName(b.name)
+      if (!w) throw new Error(`no workflow named ${b.name}`)
+      return { workflows: [{ name: w.name, ...assessWorkflow(w, repo.stepMatches(w.id)) }] }
+    }
+    return {
+      workflows: repo.listWorkflows().map((w) => ({
+        name: w.name,
+        ...assessWorkflow(w, repo.stepMatches(w.id)),
+      })),
+    }
+  },
+
+  /** Activate a proposed workflow. This is the human confirmation that a
+   *  recording is allowed to run — nothing else flips a workflow to active. */
+  '/api/workflows.activate': (b) => {
+    const name = b?.name ?? missing('name')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    if (!w.steps.length) throw new Error(`workflow "${name}" has no steps to run`)
+    return { workflow: repo.saveWorkflow({ ...w, status: 'active' }) }
+  },
+
+  /** Edit one step in place. The repair path for a workflow whose page moved:
+   *  the other nineteen steps were reviewed once and are still fine. */
+  '/api/workflows.replaceStep': (b) => {
+    const name = b?.name ?? missing('name')
+    const stepId = b?.stepId ?? missing('stepId')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    return { workflow: repo.replaceStep(w.id, stepId, b?.step ?? {}) }
+  },
+
+  '/api/workflows.removeStep': (b) => {
+    const name = b?.name ?? missing('name')
+    const stepId = b?.stepId ?? missing('stepId')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    return { workflow: repo.removeStep(w.id, stepId) }
+  },
+
+  /** Re-propose from the original recording. Useful when the proposal rules
+   *  improved after a workflow was made. */
+  '/api/drafts.repropose': (b) => {
+    const d = repo.getDraft(b?.id ?? missing('id'))
+    if (!d) throw new Error(`no draft ${b.id}`)
+    const proposed = proposeWorkflow({ name: d.name, origins: d.origins, raw: d.raw })
+    const existing = repo.getWorkflowByName(proposed.name)
+    return {
+      workflow: repo.saveWorkflow({
+        ...proposed,
+        ...(existing ? { id: existing.id } : {}),
+        profileId: d.profileId,
+      }),
+    }
   },
 
   '/api/workflows.save': (b) => {

@@ -32,6 +32,11 @@ npm run build
 The extension finds the daemon on localhost by itself. There is nothing to paste and
 no settings page.
 
+It asks for **no site access at install time.** Permission is requested for one origin
+at a time, at the moment you start recording on it — so the guarantee that Atelier can
+only touch the sites you recorded on is enforced by the browser, not just promised
+here.
+
 ### Start the daemon
 
 It starts itself the first time Claude Code calls a tool, so usually you do nothing.
@@ -69,32 +74,58 @@ If the page will not load at all, the daemon is not running — `npm start`, or 
 ## Recording a workflow
 
 1. Open the site, click the Atelier icon, hit **Record a workflow**, name it.
-2. Do the thing once — type the prompt, click generate.
-3. When the result appears, click **Capture output**, then click the image itself.
-4. Hit **Stop** — in the page bar or the side panel. **That is what saves it.**
+2. Do the task once. Every click and every field is captured, and the side panel lists
+   them as they happen — so you can see it heard the right thing rather than trusting a
+   counter.
+3. Point at the result with **Capture result**. **It does not have to exist yet.**
+   Click where it will appear and Atelier watches that region until something turns up.
+4. **Save recording.**
 
-There is no separate save button. Stop writes the recording to the daemon and the
-panel confirms with the action count.
+**Why step 3 is the important one.** At the moment you click Generate, the thing you are
+waiting for does not exist, so there is nothing to click. A recorder that captures by
+clicking a finished result can therefore never record the wait that produced it — which
+is most of what makes a workflow work. Pointing at the empty region instead is what
+closes that gap.
 
-The recording is now a *draft*, not a workflow. It needs one review pass, which Claude
-does: ask it to check drafts, and it reads the trace, picks the stable selectors, adds
-the waits, and turns your typed prompt into a `{{prompt}}` placeholder.
+Use **Wait for…** for anything else the page has to do before the next step — a spinner
+appearing, a dialog closing. Hold Alt while pointing to wait for something to *go* rather
+than arrive.
 
-**Passwords are never recorded.** A password field becomes a step that parks the job
-and waits for you.
+**Saving writes the workflow.** Atelier orders the selectors, inserts the waits, turns
+your longest typed value into a `{{placeholder}}` and works out what the workflow
+produces. The side panel shows you the result, step by step, and nothing runs until you
+press **Activate**. No other application is involved.
+
+**Passwords are never recorded** — not the value, and not as part of a selector. A
+password field becomes a step that parks the job and hands you the keyboard.
+
+## When a workflow starts to rot
+
+Replay tries every selector it recorded, best first, and uses whichever resolves. That
+is what carries a workflow through a redeploy — and it is also what hides one, because a
+step quietly matching on its position in the page looks exactly like a step matching on
+a stable test id, right up until the layout moves too.
+
+So replay reports which candidate won, and Atelier compares it to the one the step was
+recorded against. `workflow_health` and the side panel say what is decaying and how
+badly, before it breaks. When something has moved, **Re-record** that one step from the
+panel — the other nineteen were fine.
 
 ## Using it from Claude Code
 
 ```
-atelier_status                → is the daemon up, is a browser attached
+atelier_status                → is the daemon up, is a browser attached, is anything rotting
 list_workflows                → what this machine can do
+get_workflow  name            → every step, with ids and health
 run_workflow  name, inputs    → replay it, wait, return the asset
+workflow_health [name]        → what each step is matching on now vs. as recorded
+repair_step   name, stepId    → fix one step without touching the rest
 list_jobs / job_status        → what ran, what is parked
 resume_job / cancel_job       → after the human clears an obstacle
 save_asset    id, path        → write the asset into the repo
 list_assets                   → reuse instead of regenerate
-list_drafts / get_draft / promote_draft / delete_draft   → the review pass
-define_workflow / delete_workflow                        → hand-write or remove one
+list_drafts / get_draft       → the raw trace, for diagnosing a bad proposal
+define_workflow / delete_workflow / promote_draft        → hand-write or replace one
 ```
 
 Check `atelier_status` before `run_workflow`: a workflow with no browser attached parks
@@ -104,6 +135,11 @@ A workflow types whatever string it is handed and applies no house style of its 
 Anything long-form — a prompt, a message body, a search query — is composed by the
 caller and passed whole, so where that text comes from stays a property of your project
 rather than of Atelier.
+
+**Nothing in the core names a site.** `npm run check:generic` fails the build if it
+does. A general tool that knows about one particular service is a tool that only really
+works for whoever wrote it, and the drift is invisible — the logic stays correct while
+the words around it rot.
 
 ## When something goes wrong
 
@@ -117,8 +153,11 @@ sensible retry is a human looking at the screen.
 
 ## What is deliberately absent
 
-- **No settings page.** Ports are probed, profiles are detected, timeouts come from the
-  review pass. Nothing that can be worked out is asked.
+- **No settings page.** Ports are probed, profiles are detected, timeouts and selector
+  ordering are worked out when a recording is saved. Nothing that can be derived is
+  asked.
+- **No review queue.** A recording becomes a workflow the moment it is saved. You
+  confirm it; you are never asked to go and prompt something else to finish it.
 - **No cloud.** The daemon binds `127.0.0.1`. Assets never leave the machine unless you
   copy them into a repo.
 - **No unscoped automation.** Every workflow carries an origin allowlist and replay

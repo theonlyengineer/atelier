@@ -162,3 +162,90 @@ dialog input {
   font: inherit;
 }
 dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 14px 0 0; padding: 0; }
+
+/* --------------------------------------------------------------- v0.4 --- */
+
+/* Health as a chip, not a sentence: the glanceable question is "does anything
+   need me", and a colour answers it faster than a clause. */
+.chip {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.chip-degraded { background: #4a3a12; color: #f0c674; }
+.chip-fragile { background: #4a1f1b; color: #ff9b91; }
+.chip-unknown { background: #2a2f38; color: #98a2b3; }
+
+.wf { padding: 10px 0; border-bottom: 1px solid rgb(255 255 255 / 7%); }
+.wf:last-child { border-bottom: 0; }
+.wf-head { display: flex; align-items: center; gap: 8px; }
+.wf-health { font-size: 11px; opacity: 0.7; margin-top: 4px; line-height: 1.45; }
+
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding-left: 10px;
+  border-left: 2px solid #4a3a12;
+}
+.step-note {
+  font-size: 11px;
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.tiny { font-size: 10px; padding: 3px 7px; margin-left: auto; flex: none; }
+
+/* The live capture list. Numbered because a recording is a sequence and the
+   order is the thing you are checking. */
+.steps {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.steps li { opacity: 0.85; }
+.steps li.is-capture { color: #7ee2a8; opacity: 1; }
+.steps li.is-secret { color: #98a2b3; font-style: italic; }
+
+.label-rec::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e5484d;
+  margin-right: 6px;
+  animation: panel-pulse 1.4s ease-in-out infinite;
+}
+@keyframes panel-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+
+@media (prefers-reduced-motion: reduce) {
+  .label-rec::before { animation: none }
+}
+
+/* The first screen anyone sees. It used to be four words and a dead end. */
+.guide {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  opacity: 0.9;
+}
+.guide strong { font-weight: 600; }
+.guide em { opacity: 0.85; }
+
+button:disabled { opacity: 0.4; cursor: default; }

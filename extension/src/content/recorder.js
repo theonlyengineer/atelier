@@ -1,18 +1,32 @@
 /**
- * Captures what the human does, richly enough that the review pass has real
+ * Captures what the human does, richly enough that the proposal pass has real
  * choices to make.
  *
- * The design decision that matters: every interaction records *many* selector
- * candidates, not one. A recorder that stores a single CSS path produces
- * workflows that break the first time a class hash changes.
+ * Two design decisions carry this file.
+ *
+ * The first: every interaction records *many* selector candidates, not one. A
+ * recorder that stores a single CSS path produces workflows that break the first
+ * time a class hash changes.
+ *
+ * The second: a result can be pointed at before it exists. Capturing by clicking
+ * the finished thing only works if you already have a finished thing, which
+ * means it cannot record the wait that produced it — and the wait is most of
+ * what makes a workflow work. So arming a capture over an empty region starts a
+ * MutationObserver, and the selector is resolved from whatever turns up there.
+ * That is the difference between recording half a workflow and all of it.
  */
 ;(() => {
   if (window.__atelierRecorder) return
   window.__atelierRecorder = true
 
   let active = false
-  let capturing = false // "Capture output" armed: next click marks the artifact
+  /** null | 'capture' | 'wait' — what the next click on the page means. */
+  let picking = null
+  /** 'workflow' records until you save; 'step' captures one action and stops. */
+  let mode = 'workflow'
   let count = 0
+  let observer = null
+  let poller = null
 
   /* ---------------------------------------------------------- selectors */
 
@@ -56,7 +70,8 @@
   }
 
   /** Every way we can name this element, scored by how well each survives a
-   *  redeploy. The review pass picks; replay falls back down the list. */
+   *  redeploy. The proposal pass orders them; replay falls back down the list,
+   *  and reports which one it used so decay is visible. */
   function selectorsFor(el) {
     const out = []
     const push = (strategy, value, score) => value && out.push({ strategy, value, score })
@@ -69,7 +84,11 @@
     const aria = el.getAttribute('aria-label')
     push('aria', aria && `[aria-label="${esc(aria)}"]`, 88)
     const role = el.getAttribute('role') || implicitRole(el)
-    const name = (aria || el.textContent || el.value || '').trim().slice(0, 60)
+    // Deliberately not el.value. A field's current contents are not its name:
+    // they change between runs, so a selector built on them is broken by
+    // definition — and for a password field, writing the value into a selector
+    // would leak the exact thing the recorder refuses to record.
+    const name = (aria || (isTypeable(el) ? '' : el.textContent) || '').trim().slice(0, 60)
     if (role && name) push('role', `${role}:${name}`, 84)
     if (el.name) push('name', `[name="${esc(el.name)}"]`, 80)
     const ph = el.getAttribute('placeholder')
@@ -79,6 +98,10 @@
     push('xpath', xPath(el), 30)
     return out
   }
+
+  /** Anything whose value is user content rather than identity. */
+  const isTypeable = (el) =>
+    el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable === true
 
   function implicitRole(el) {
     if (el.tagName === 'BUTTON') return 'button'
@@ -104,6 +127,102 @@
         null,
       selectors: selectorsFor(el),
     }
+  }
+
+  /* ------------------------------------------------------------ capture */
+
+  /**
+   * What counts as "the result turned up".
+   *
+   * Deliberately narrow. A generating page mutates constantly — spinners,
+   * progress text, skeletons — and treating any mutation as the result is how
+   * you capture a loading placeholder and call the job done. An image with a
+   * real source, a video, a canvas, or a substantial block of text are the
+   * things people actually wait for.
+   */
+  function resultIn(root) {
+    if (!root || root.nodeType !== 1) return null
+
+    const media = [root, ...root.querySelectorAll('img, video, canvas')].find((el) => {
+      if (el.tagName === 'IMG') {
+        const src = el.currentSrc || el.getAttribute('src') || ''
+        // A 1px tracking pixel or an inline spinner is not a result.
+        return src && !src.startsWith('data:image/gif') && el.naturalWidth > 64
+      }
+      if (el.tagName === 'VIDEO') return !!el.currentSrc
+      if (el.tagName === 'CANVAS') return el.width > 64 && el.height > 64
+      return false
+    })
+    if (media) return media
+
+    const block = [root, ...root.querySelectorAll('pre, code, article, p, td')].find(
+      (el) => (el.textContent || '').trim().length > 40,
+    )
+    return block || null
+  }
+
+  /** Image, text, or a file to download — inferred from what actually appeared,
+   *  so nobody has to answer a question about it. */
+  function captureKind(el) {
+    if (['IMG', 'VIDEO', 'CANVAS', 'SVG'].includes(el.tagName)) return { as: 'image', attribute: 'src' }
+    if (el.tagName === 'A' && el.hasAttribute('download')) return { as: 'download', attribute: 'href' }
+    return { as: 'text' }
+  }
+
+  function stopObserving() {
+    observer?.disconnect()
+    observer = null
+    clearInterval(poller)
+    poller = null
+  }
+
+  /**
+   * Watch a region until the result arrives, then record the capture against
+   * whatever turned up.
+   *
+   * This is the whole point of the file. At the moment you click Generate the
+   * thing you are waiting for does not exist, so there is nothing to point at —
+   * which is why every recording used to come back missing the one step that
+   * mattered.
+   */
+  function watchForResult(container) {
+    stopObserving()
+    setStatus(`Watching for the result…`)
+
+    const settle = (node, waited) => {
+      stopObserving()
+      record({
+        kind: 'capture',
+        element: describe(node),
+        capture: captureKind(node),
+        // Recorded so the proposal pass knows this was a real wait, and so a
+        // human reading the workflow later can see it was.
+        resolvedByObserver: waited,
+      })
+      flash(node, '#2d7d46')
+      setStatus('')
+      if (mode === 'step') finishStepMode()
+    }
+
+    // It may already be there — someone arming capture over a finished result
+    // should not be left waiting for a mutation that never comes.
+    const already = resultIn(container)
+    if (already) return settle(already, false)
+
+    const tryResolve = () => {
+      const found = resultIn(container)
+      if (found) settle(found, true)
+    }
+
+    observer = new MutationObserver(tryResolve)
+    observer.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] })
+
+    // The backstop, and not an optional one. An <img> is inserted and decoded
+    // asynchronously: the mutation fires while naturalWidth is still 0, and
+    // nothing mutates again when the decode completes. Watching only for
+    // mutations means the common case — an image arriving — is the case that
+    // never resolves.
+    poller = setInterval(tryResolve, 250)
   }
 
   /* ------------------------------------------------------------ capture */
@@ -140,43 +259,48 @@
 
   function onClick(event) {
     if (!active) return
+
+    // Arming a capture or a wait means this click is a *pointer*, not an action
+    // to replay. Swallow it so the page does not also act on it.
+    if (picking) {
+      event.preventDefault()
+      event.stopPropagation()
+      const target = event.target
+      const armed = picking
+      picking = null
+      setPicking(null)
+
+      if (armed === 'capture') {
+        // Point at the container, not the pixel. Clicking "where the image will
+        // be" usually lands on a wrapper, which is exactly the right thing to
+        // observe.
+        watchForResult(target.closest('figure, picture, main, section, article, div') || target)
+      } else {
+        record({
+          kind: 'wait',
+          element: describe(target),
+          wait: { kind: event.altKey ? 'hidden' : 'visible' },
+        })
+        flash(target, '#8a6d1f')
+        if (mode === 'step') finishStepMode()
+      }
+      return
+    }
+
     const el = event.target.closest(
       'button, a, input, textarea, select, [role], [onclick], label, [contenteditable]',
     )
     if (!el || el.closest('#atelier-bar')) return
 
-    if (capturing) {
-      event.preventDefault()
-      event.stopPropagation()
-      capturing = false
-      setCapturing(false)
-      // Prefer the actual <img>. Clicking "the picture" usually lands on a
-      // wrapper div, and a div has no src — which produced a capture step that
-      // could never succeed.
-      const raw = event.target
-      const img =
-        (raw.tagName === 'IMG' && raw) ||
-        raw.querySelector?.('img') ||
-        raw.closest?.('figure, picture, [role="img"], div')?.querySelector?.('img') ||
-        null
-      const target = img || el
-      record({
-        kind: 'capture',
-        element: describe(target),
-        capture: { as: 'image', attribute: 'src' },
-        foundImg: !!img,
-      })
-      flash(target, '#2d7d46')
-      return
-    }
     record({ kind: 'click', element: describe(el) })
     flash(el, '#1f6feb')
+    if (mode === 'step') finishStepMode()
   }
 
   const pendingInput = new WeakMap()
 
   function onInput(event) {
-    if (!active) return
+    if (!active || picking) return
     // A contenteditable fires input on the editable host or a descendant, so
     // walk up to the element that actually owns the text.
     let el = event.target
@@ -192,19 +316,26 @@
         record({
           kind: 'type',
           element: describe(el),
-          // A password is never written down. The review pass turns this into a
-          // `manual` step that parks the job for the human.
+          // A password is never written down. The proposal pass turns this into
+          // a `manual` step that parks the job for the human.
           value: isSecret(el) ? null : readValue(el),
           secret: isSecret(el),
           contentEditable: el.isContentEditable === true,
         })
         flash(el, '#1f6feb')
+        if (mode === 'step') finishStepMode()
       }, 600),
     )
   }
 
   function onKey(event) {
-    if (!active || !['Enter', 'Tab', 'Escape'].includes(event.key)) return
+    if (!active || picking) return
+    if (event.key === 'Escape' && picking) {
+      picking = null
+      setPicking(null)
+      return
+    }
+    if (!['Enter', 'Tab', 'Escape'].includes(event.key)) return
     if (event.target?.closest?.('#atelier-bar')) return
     record({ kind: 'key', value: event.key })
   }
@@ -219,29 +350,56 @@
 
   /* --------------------------------------------------------------- bar */
 
-  let bar, countEl, captureBtn
+  let bar, countEl, statusEl
 
   function buildBar(name) {
     bar = document.createElement('div')
     bar.id = 'atelier-bar'
-    bar.innerHTML = `
-      <span class="atelier-dot"></span>
-      <span class="atelier-name">Recording “${name}”</span>
-      <span class="atelier-count">0 actions</span>
-      <button class="atelier-btn" data-act="capture">Capture output</button>
-      <button class="atelier-btn atelier-stop" data-act="stop">Stop</button>`
+    if (mode === 'step') {
+      bar.innerHTML = `
+        <span class="atelier-dot"></span>
+        <span class="atelier-name">Re-recording one step</span>
+        <span class="atelier-status">Do that one action again</span>
+        <button class="atelier-btn atelier-ghost" data-act="discard">Cancel</button>`
+    } else {
+      bar.innerHTML = `
+        <span class="atelier-dot"></span>
+        <span class="atelier-name">Recording “${name}”</span>
+        <span class="atelier-count">0 actions</span>
+        <span class="atelier-status"></span>
+        <button class="atelier-btn" data-act="capture" title="Point at where the result will appear — it does not have to be there yet">Capture result</button>
+        <button class="atelier-btn" data-act="wait" title="Point at something to wait for. Hold Alt to wait for it to disappear instead">Wait for…</button>
+        <button class="atelier-btn atelier-ghost" data-act="undo" title="Remove the last thing recorded">Undo</button>
+        <button class="atelier-btn atelier-save" data-act="save">Save recording</button>
+        <button class="atelier-btn atelier-ghost" data-act="discard" title="Throw this recording away">Discard</button>`
+    }
     document.documentElement.appendChild(bar)
     countEl = bar.querySelector('.atelier-count')
-    captureBtn = bar.querySelector('[data-act="capture"]')
+    statusEl = bar.querySelector('.atelier-status')
 
     bar.addEventListener('click', (e) => {
       const act = e.target?.dataset?.act
-      if (act === 'stop') {
-        chrome.runtime.sendMessage({ t: 'record.stopFromPage' })
+      if (!act) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (act === 'save') {
+        stopObserving()
+        chrome.runtime.sendMessage({ t: 'record.saveFromPage' })
         teardown()
-      } else if (act === 'capture') {
-        capturing = !capturing
-        setCapturing(capturing)
+      } else if (act === 'discard') {
+        stopObserving()
+        chrome.runtime.sendMessage({ t: 'record.discardFromPage' })
+        teardown()
+      } else if (act === 'undo') {
+        chrome.runtime.sendMessage({ t: 'record.undo' }, (res) => {
+          if (typeof res?.count === 'number') {
+            count = res.count
+            setCount(count)
+          }
+        })
+      } else if (act === 'capture' || act === 'wait') {
+        picking = picking === act ? null : act
+        setPicking(picking)
       }
     })
   }
@@ -250,16 +408,34 @@
     if (countEl) countEl.textContent = `${n} action${n === 1 ? '' : 's'}`
   }
 
-  function setCapturing(on) {
-    document.documentElement.classList.toggle('atelier-picking', on)
-    if (captureBtn) {
-      captureBtn.textContent = on ? 'Click the result…' : 'Capture output'
-      captureBtn.classList.toggle('atelier-armed', on)
+  function setStatus(text) {
+    if (statusEl) statusEl.textContent = text
+  }
+
+  function setPicking(which) {
+    document.documentElement.classList.toggle('atelier-picking', !!which)
+    for (const btn of bar?.querySelectorAll('[data-act="capture"], [data-act="wait"]') ?? []) {
+      btn.classList.toggle('atelier-armed', btn.dataset.act === which)
     }
+    setStatus(
+      which === 'capture'
+        ? 'Click where the result will appear'
+        : which === 'wait'
+          ? 'Click what to wait for'
+          : '',
+    )
+  }
+
+  /** One-action mode: capture, hand it back, and get out of the way. */
+  function finishStepMode() {
+    chrome.runtime.sendMessage({ t: 'record.stepDone' })
+    teardown()
   }
 
   function teardown() {
     active = false
+    picking = null
+    stopObserving()
     document.removeEventListener('click', onClick, true)
     document.removeEventListener('input', onInput, true)
     document.removeEventListener('keydown', onKey, true)
@@ -271,16 +447,26 @@
   chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     if (msg.t === 'record.begin') {
       active = true
-      count = 0
+      mode = msg.mode === 'step' ? 'step' : 'workflow'
+      count = msg.count ?? 0
       buildBar(msg.draftName)
+      setCount(count)
       document.addEventListener('click', onClick, true)
       document.addEventListener('input', onInput, true)
       document.addEventListener('keydown', onKey, true)
-      record({ kind: 'navigate', value: location.href })
+      // Only a fresh workflow recording opens with where it started. A
+      // re-recorded step is being spliced into a workflow that already knows.
+      if (mode === 'workflow' && count === 0) record({ kind: 'navigate', value: location.href })
       respond({ ok: true })
     } else if (msg.t === 'record.end') {
       teardown()
       respond({ ok: true })
+    } else if (msg.t === 'record.count') {
+      count = msg.count ?? count
+      setCount(count)
+      respond({ ok: true })
+    } else {
+      respond({ ok: false })
     }
     return true
   })

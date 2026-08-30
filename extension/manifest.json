@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Atelier",
-  "version": "0.3.0",
-  "description": "Records and replays browser workflows that produce assets, driven by Claude Code.",
+  "version": "0.4.0",
+  "description": "Records and replays browser workflows that produce assets, driven by your coding agent.",
   "minimum_chrome_version": "116",
   "background": {
     "service_worker": "src/background.js",
@@ -20,13 +20,10 @@
     "scripting",
     "notifications",
     "sidePanel",
-    "alarms",
-    "identity.email"
+    "alarms"
   ],
-  "host_permissions": [
-    "http://127.0.0.1/*",
-    "<all_urls>"
-  ],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "icons": {
     "128": "src/icons/icon128.png"
   }

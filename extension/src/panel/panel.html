@@ -28,26 +28,62 @@
       <ul id="running" class="cards"></ul>
     </section>
 
+    <!-- Recorded, turned into a workflow, and waiting to be allowed to run.
+         Above everything else because it is one click from being useful, and
+         because a proposal nobody sees is a recording nobody made. -->
+    <section id="pending-section" hidden>
+      <h2 class="label label-go">Ready to activate</h2>
+      <ul id="pending" class="cards"></ul>
+    </section>
+
+    <!-- Live during a recording. A count alone cannot tell you the recorder
+         heard the wrong thing; a list can. -->
+    <section id="capture-section" hidden>
+      <h2 class="label label-rec">Recording</h2>
+      <ol id="capture-list" class="steps"></ol>
+      <p id="capture-empty" class="hint">
+        Nothing captured yet. Do the task once. When you reach the point where
+        the result appears, hit <strong>Capture result</strong> in the bar at the
+        top of the page and click where it will be — it does not have to be there
+        yet.
+      </p>
+      <div class="actions">
+        <button id="capture-save" class="primary">Save recording</button>
+        <button id="capture-undo" class="ghost">Undo last</button>
+        <button id="capture-discard" class="ghost">Discard</button>
+      </div>
+    </section>
+
     <section id="record-section">
       <button id="record" class="record">
         <span class="record-dot"></span>
         <span id="record-label">Record a workflow</span>
       </button>
-      <p id="record-hint" class="hint" hidden>
-        Do the thing once. When the result appears, hit <strong>Capture output</strong>
-        and click it. Then <strong>Stop</strong> — that saves the recording.
-      </p>
       <p id="record-done" class="hint done" hidden></p>
     </section>
 
-    <!-- Recordings that need Claude's review. Above the workflow list because
-         this is the one thing here that is waiting on somebody. -->
-    <section id="drafts-section" hidden>
-      <h2 class="label label-go">Awaiting review</h2>
-      <ul id="drafts" class="cards"></ul>
+    <!-- The first screen a new user sees. It used to say "Nothing recorded
+         yet." and stop, which is a dead end at exactly the moment the product
+         has to teach itself. -->
+    <section id="first-run" hidden>
+      <h2 class="label">Getting started</h2>
+      <ol class="guide">
+        <li><strong>Open the page</strong> you want to automate, and sign in if it needs it.</li>
+        <li><strong>Record a workflow</strong>, and give it a short name.</li>
+        <li><strong>Do the task once.</strong> Every click and every field is captured.</li>
+        <li>
+          <strong>Point at the result</strong> with <em>Capture result</em> — before it
+          exists is fine, Atelier waits for it.
+        </li>
+        <li><strong>Save.</strong> Atelier writes the workflow; you confirm it here.</li>
+      </ol>
+      <p class="hint">
+        Atelier only ever gets access to sites you record on, and never records a
+        password.
+      </p>
     </section>
 
-    <!-- Everything below is reference, not action, so it is collapsed. -->
+    <!-- Everything below is reference, not action. -->
     <details id="workflows-details" open>
       <summary>
         <span>Workflows</span>
@@ -65,8 +101,8 @@
     <dialog id="name-dialog">
       <form method="dialog">
         <h3>Name this workflow</h3>
-        <p class="hint">Claude calls it by this name. Short and kebab-case.</p>
-        <input id="name-input" name="name" placeholder="generate-image" autocomplete="off" />
+        <p class="hint">Your agent calls it by this name. Short and kebab-case.</p>
+        <input id="name-input" name="name" placeholder="export-invoices" autocomplete="off" />
         <menu>
           <button value="cancel" class="ghost">Cancel</button>
           <button id="name-go" value="ok" class="primary">Start recording</button>

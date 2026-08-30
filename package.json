@@ -10,11 +10,15 @@
   "scripts": {
     "build": "npm run build --workspace server",
     "dev": "npm run dev --workspace server",
-    "test": "npm run test --workspace server",
+    "test": "npm run check:generic && npm run test --workspace server",
     "start": "node --disable-warning=ExperimentalWarning server/dist/daemon.js",
-    "dashboard": "node -e \"console.log('http://127.0.0.1:' + (process.env.ATELIER_PORT || 7717))\""
+    "dashboard": "node -e \"console.log('http://127.0.0.1:' + (process.env.ATELIER_PORT || 7717))\"",
+    "check:generic": "node scripts/check-generic.mjs"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.9.0"
   }
 }

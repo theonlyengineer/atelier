@@ -16,6 +16,7 @@ export const MSG = {
   JOB_CANCELLED: 'job.cancelled',
   JOB_DONE: 'job.done',
   STATE: 'state',
+  WORKFLOW_PROPOSED: 'workflow.proposed',
   HELLO_OK: 'hello.ok',
   // us → daemon
   HELLO: 'hello',
@@ -24,6 +25,7 @@ export const MSG = {
   JOB_RESUME: 'job.resume',
   JOB_CANCEL: 'job.cancel',
   DRAFT_SAVE: 'draft.save',
+  STEP_RERECORD: 'step.rerecord',
   STATE_REQUEST: 'state.request',
   PING: 'ping',
 }

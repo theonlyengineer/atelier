@@ -100,3 +100,83 @@ test('a job records its step position and blocked reason', () => {
   assert.equal(after.blockedReason, 'sign in')
   assert.equal(after.workflowName, 'w3')
 })
+
+/* ------------------------------------------------------------ escalation */
+
+test('a job parked for a long time is mentioned again, but not every minute', async () => {
+  // One notification is all a parked job used to get. If the browser was shut,
+  // or the toast was swiped past, nobody was told again and the job waited
+  // forever — which reads to the human as Atelier having lost their work.
+  const { Runner } = await import('../src/core/runner.ts')
+
+  const said: string[] = []
+  const runner = new Runner({
+    hub: { onMessage: () => {}, clientFor: () => null, send: () => {} } as never,
+    onChange: () => {},
+    notify: (title, body) => said.push(`${title}|${body}`),
+  })
+
+  const wf = repo.saveWorkflow({
+    name: 'parked-workflow',
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [{ id: 's', kind: 'click', selectors: [{ strategy: 'id', value: '#a', score: 92 }], timeoutMs: 1000 }],
+  } as never)
+
+  const job = repo.createJob(wf.id, {}, 1)
+  repo.updateJob(job.id, { status: 'blocked', blockedReason: 'Sign in first.' })
+
+  // Other tests in this file leave jobs behind, so everything here is scoped to
+  // this one rather than to the whole table.
+  const mine = (ids: string[]) => ids.filter((id) => id === job.id)
+  const aboutMine = () => said.filter((s) => s.includes('parked-workflow')).length
+
+  const now = Date.now()
+  assert.deepEqual(mine(runner.escalateStaleBlocks(15 * 60 * 1000, now)), [], 'not yet — it has only just parked')
+  assert.equal(aboutMine(), 0)
+
+  const later = now + 16 * 60 * 1000
+  assert.deepEqual(mine(runner.escalateStaleBlocks(15 * 60 * 1000, later)), [job.id])
+  assert.equal(aboutMine(), 1)
+  assert.match(said.find((s) => s.includes('parked-workflow'))!, /still waiting/)
+  assert.match(said.find((s) => s.includes('parked-workflow'))!, /Sign in first/)
+
+  // A nag that repeats every sweep is noise, and noise gets muted.
+  assert.deepEqual(mine(runner.escalateStaleBlocks(15 * 60 * 1000, later + 60_000)), [])
+  assert.equal(aboutMine(), 1)
+
+  // But it does come back round.
+  assert.deepEqual(mine(runner.escalateStaleBlocks(15 * 60 * 1000, later + 16 * 60 * 1000)), [job.id])
+  assert.equal(aboutMine(), 2)
+})
+
+test('a job that is not blocked is never nagged about', async () => {
+  const { Runner } = await import('../src/core/runner.ts')
+  const said: string[] = []
+  const runner = new Runner({
+    hub: { onMessage: () => {}, clientFor: () => null, send: () => {} } as never,
+    onChange: () => {},
+    notify: (title, body) => said.push(`${title}|${body}`),
+  })
+
+  const wf = repo.saveWorkflow({
+    name: 'finished-workflow',
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [{ id: 's', kind: 'click', selectors: [{ strategy: 'id', value: '#a', score: 92 }], timeoutMs: 1000 }],
+  } as never)
+  const job = repo.createJob(wf.id, {}, 1)
+  repo.updateJob(job.id, { status: 'done' })
+
+  const nagged = runner.escalateStaleBlocks(0, Date.now() + 10 ** 9)
+  assert.equal(nagged.includes(job.id), false)
+  assert.equal(said.filter((s) => s.includes('finished-workflow')).length, 0)
+})

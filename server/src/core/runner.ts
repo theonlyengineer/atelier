@@ -10,6 +10,7 @@ import type { Hub, Client } from '../ws/hub.ts'
 import type { ClientMsg } from '../ws/protocol.ts'
 import type { Job, Step, Workflow } from '../types.ts'
 import * as repo from '../db/repo.ts'
+import { proposeWorkflow } from './propose.ts'
 
 /** Substitutes {{name}} from the job's inputs. Unknown placeholders are left
  *  alone rather than blanked, so a typo is visible in the browser instead of
@@ -30,6 +31,7 @@ export interface RunnerDeps {
 
 export class Runner {
   private inFlight = new Map<string, { workflow: Workflow; client: Client }>()
+  private lastEscalated = new Map<string, number>()
   private deps: RunnerDeps
 
   // Written out rather than as a parameter property so `node
@@ -82,6 +84,30 @@ export class Runner {
     this.inFlight.delete(jobId)
     this.deps.notify?.('Atelier needs you', reason)
     this.deps.onChange()
+  }
+
+  /**
+   * A job parks and notifies once. If the browser was closed, or the
+   * notification was dismissed on the way past, nobody is told again and the
+   * job waits forever — which reads as "Atelier lost my work". Say it again,
+   * periodically, for as long as it is still waiting.
+   */
+  escalateStaleBlocks(afterMs = 15 * 60 * 1000, now = Date.now()): string[] {
+    const nagged: string[] = []
+    for (const job of repo.listJobs(['blocked'])) {
+      const waitingFor = now - new Date(job.updatedAt).getTime()
+      if (waitingFor < afterMs) continue
+      const since = Math.round(waitingFor / 60000)
+      const last = this.lastEscalated.get(job.id) ?? 0
+      if (now - last < afterMs) continue
+      this.lastEscalated.set(job.id, now)
+      this.deps.notify?.(
+        `${job.workflowName} is still waiting`,
+        `${job.blockedReason ?? 'Paused.'} (${since} minutes)`,
+      )
+      nagged.push(job.id)
+    }
+    return nagged
   }
 
   /** Send the current step, or finish the job if there are none left. */
@@ -144,7 +170,17 @@ export class Runner {
       case 'step.ok': {
         const job = repo.getJob(msg.jobId)
         if (!job || job.stepIndex !== msg.stepIndex) return // stale ack
-        repo.addJobEvent(msg.jobId, 'step.ok', { index: msg.stepIndex })
+        // Which candidate resolved is the only signal that a workflow is
+        // decaying. Recorded here rather than in the extension so it survives
+        // the extension being a version behind.
+        if (msg.matched) {
+          const workflow = repo.getWorkflow(job.workflowId)
+          const step = workflow?.steps[msg.stepIndex]
+          if (workflow && step) {
+            repo.recordStepMatch(workflow.id, step.id, msg.matched.strategy, msg.matched.score)
+          }
+        }
+        repo.addJobEvent(msg.jobId, 'step.ok', { index: msg.stepIndex, matched: msg.matched ?? null })
         repo.updateJob(msg.jobId, { stepIndex: msg.stepIndex + 1 })
         this.pump(msg.jobId)
         break
@@ -171,12 +207,54 @@ export class Runner {
         this.cancel(msg.jobId)
         break
       case 'draft.save': {
-        repo.createDraft({
+        const draftId = repo.createDraft({
           name: msg.name,
           profileId: client.profileId,
           origins: msg.origins,
           raw: msg.raw,
         })
+        // Propose the workflow now, rather than leaving a draft sitting in the
+        // panel with "ask Claude Code to review drafts" under it. The rules
+        // that turn a trace into steps are fixed (core/propose.ts), so there is
+        // nothing here worth a round trip through another application. The
+        // result is saved as `draft` status: visible, editable, and unable to
+        // run until a human activates it.
+        try {
+          const proposed = proposeWorkflow({ name: msg.name, origins: msg.origins, raw: msg.raw })
+          const existing = repo.getWorkflowByName(proposed.name)
+          const saved = repo.saveWorkflow({
+            ...proposed,
+            ...(existing ? { id: existing.id } : {}),
+            profileId: client.profileId,
+          })
+          repo.markDraftReviewed(draftId)
+          this.deps.hub.send(client, {
+            t: 'workflow.proposed',
+            name: saved.name,
+            steps: saved.steps.length,
+            inputs: saved.inputs.map((i) => i.name),
+            produces: saved.produces,
+          })
+        } catch (e) {
+          // A recording we cannot turn into a workflow stays a draft rather
+          // than disappearing. The panel shows why.
+          this.deps.notify?.('Atelier could not use that recording', (e as Error).message)
+        }
+        this.deps.onChange()
+        break
+      }
+
+      case 'step.rerecord': {
+        // Repairing one step of a workflow whose page moved, without
+        // re-recording the other nineteen.
+        const workflow = repo.getWorkflowByName(msg.workflowName)
+        if (!workflow) break
+        try {
+          const patch = stepFromAction(msg.action)
+          repo.replaceStep(workflow.id, msg.stepId, patch)
+        } catch (e) {
+          this.deps.notify?.('Atelier could not replace that step', (e as Error).message)
+        }
         this.deps.onChange()
         break
       }
@@ -184,4 +262,27 @@ export class Runner {
         break
     }
   }
+}
+
+/**
+ * One recorded action → the fields of a step, for re-recording a single step in
+ * place. Deliberately narrow: it replaces how the step *finds* its element and
+ * what it types, and leaves everything else — kind, waits, timeout, note —
+ * alone, because those were reviewed once and the page moving does not
+ * invalidate them.
+ */
+export function stepFromAction(action: unknown): Partial<Step> {
+  const a = (action ?? {}) as {
+    element?: { selectors?: Array<{ strategy: string; value: string; score: number }> }
+    value?: string | null
+    secret?: boolean
+  }
+  const selectors = [...(a.element?.selectors ?? [])].sort((x, y) => y.score - x.score)
+  if (selectors.length === 0) {
+    throw new Error('that element could not be identified — try clicking the control itself')
+  }
+  const patch: Partial<Step> = { selectors: selectors as Step['selectors'] }
+  // A secret is never written down, here or anywhere else.
+  if (typeof a.value === 'string' && !a.secret) patch.value = a.value
+  return patch
 }
