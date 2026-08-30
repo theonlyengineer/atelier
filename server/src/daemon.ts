@@ -118,8 +118,11 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     })),
     jobs: repo.listJobs(['queued', 'running', 'blocked'], 20),
     recent: repo.listJobs(['done', 'failed', 'cancelled'], 8),
-    workflows: repo.listWorkflows().map((w) => {
+    workflows: (() => {
+      const history = repo.runHistory()
+      return repo.listWorkflows().map((w) => {
       const health = assessWorkflow(w, repo.stepMatches(w.id))
+      const runs = history.get(w.id) ?? { total: 0, ok: 0, failed: 0, lastAt: null, recent: [] }
       return {
         name: w.name,
         description: w.description,
@@ -132,8 +135,10 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
         // dashboard needs the health to show what is rotting.
         stepList: w.steps.map((step) => ({ id: step.id, kind: step.kind, note: step.note ?? step.kind })),
         health: { state: health.state, summary: health.summary, degraded: health.degraded },
+        runs,
       }
-    }),
+    })
+    })(),
     /** Recorded, proposed, and waiting for a human to say yes. Surfaced at the
      *  top level so neither the panel nor Claude has to filter for it. */
     pendingActivation: repo

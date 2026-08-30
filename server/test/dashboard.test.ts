@@ -91,16 +91,16 @@ async function open() {
   await page.setViewport({ width: 1000, height: 900 })
   // networkidle would never fire: the dashboard holds an SSE connection open.
   await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(`document.querySelectorAll('#strip .stat').length > 0`, { timeout: 8000 })
+  await page.waitForFunction(`document.querySelectorAll('.wf').length > 0`, { timeout: 8000 })
   return page
 }
 
 const selected = (page: any) =>
   page.evaluate(`document.querySelector('[role="tab"][aria-selected="true"]')?.dataset.tab`)
 
-test('the dashboard opens on Activity, with one panel showing', skip, async () => {
+test('the dashboard opens on Workflows — the substance, not the log', skip, async () => {
   const page = await open()
-  assert.equal(await selected(page), 'activity')
+  assert.equal(await selected(page), 'workflows')
   assert.equal(
     await page.evaluate(`[...document.querySelectorAll('[role="tabpanel"]')].filter(p => !p.hidden).length`),
     1,
@@ -112,14 +112,65 @@ test('anything that needs a human stays visible on every tab', skip, async () =>
   // The whole risk of tabbing a status page: putting the reason you opened it
   // behind a click. A parked job and a detached browser never move.
   const page = await open()
-  for (const tab of ['activity', 'workflows', 'assets', 'diagnostics']) {
+  for (const tab of ['workflows', 'runs', 'assets', 'log']) {
     await page.evaluate(`location.hash = '#${tab}'`)
     await new Promise((r) => setTimeout(r, 100))
     const shown = await page.evaluate(
-      `(() => { const el = document.querySelector('#detached-sec'); return !el.hidden && el.offsetHeight > 0 })()`,
+      `(() => { const el = document.querySelector('#attention .attn'); return !!el && el.offsetHeight > 0 })()`,
     )
     assert.equal(shown, true, `the attention band must be visible on #${tab}`)
   }
+  await page.close()
+})
+
+test('a state is stated once, with the fix in one place', skip, async () => {
+  // The old page reported a detached browser in a stat card, a banner and a
+  // section — three sightings, no extra information, which teaches a reader
+  // that none of the three is worth reading. The pill summarises; the band
+  // carries the instruction; nothing else repeats either.
+  const page = await open()
+  const instructions = await page.evaluate(
+    `document.body.innerText.split('chrome://extensions').length - 1`,
+  )
+  assert.equal(instructions, 1, 'the fix should appear exactly once')
+  assert.equal(
+    await page.evaluate(`document.querySelectorAll('#attention .attn').length`),
+    1,
+    'one attention card for one problem',
+  )
+  await page.close()
+})
+
+test('the status pill says what state the whole system is in', skip, async () => {
+  const page = await open()
+  const status = await page.evaluate(
+    `(() => { const el = document.querySelector('#status'); return { cls: el.className, text: el.innerText.trim() } })()`,
+  )
+  // No browser is attached in this fixture, so it is a warning, not "Ready".
+  assert.match(status.cls, /warn/)
+  assert.match(status.text, /browser/i)
+  await page.close()
+})
+
+test('run history is aggregated, not enumerated', skip, async () => {
+  // Eight rows reading "generate-image · done · 2d ago" is a log wearing a
+  // summary's clothes. Twelve runs must render as one row, not twelve.
+  const decayed = repo.getWorkflowByName('decayed-workflow')!
+  for (let i = 0; i < 12; i++) {
+    const job = repo.createJob(decayed.id, {}, 1)
+    repo.updateJob(job.id, { status: i === 5 ? 'failed' : 'done' })
+  }
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#runs'`)
+  await page.waitForFunction(`document.querySelectorAll('#recent .row').length > 0`, { timeout: 8000 })
+
+  const rows = await page.evaluate(`document.querySelectorAll('#recent .row').length`)
+  assert.equal(rows, 1, '12 runs of one workflow is one row')
+  const text = await page.evaluate(`document.querySelector('#recent').innerText`)
+  assert.match(text, /12 runs/)
+  // The pill is uppercased in CSS, and innerText reports the transformed text.
+  assert.match(text, /1 failed/i)
   await page.close()
 })
 
@@ -127,7 +178,7 @@ test('a live state frame does not snap the tab back under the reader', skip, asy
   // render() runs on every change and every 25 seconds regardless. Deriving the
   // visible tab from that data is the classic way a live page becomes unusable.
   const page = await open()
-  await page.evaluate(`location.hash = '#diagnostics'`)
+  await page.evaluate(`location.hash = '#log'`)
   await new Promise((r) => setTimeout(r, 100))
 
   // Provoke a state push by mutating through the API.
@@ -136,7 +187,7 @@ test('a live state frame does not snap the tab back under the reader', skip, asy
   )
   await new Promise((r) => setTimeout(r, 1000))
 
-  assert.equal(await selected(page), 'diagnostics')
+  assert.equal(await selected(page), 'log')
   await page.close()
 })
 
@@ -147,18 +198,8 @@ test('the tab in the URL is the tab you get back on reload', skip, async () => {
   assert.equal(await page.evaluate('location.hash'), '#assets')
 
   await page.reload({ waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(`document.querySelectorAll('#strip .stat').length > 0`, { timeout: 8000 })
+  await page.waitForFunction(`document.querySelectorAll('.tabs button').length > 0`, { timeout: 8000 })
   assert.equal(await selected(page), 'assets')
-  await page.close()
-})
-
-test('a stat takes you to the tab you would act on it in', skip, async () => {
-  const page = await open()
-  await page.evaluate(
-    `[...document.querySelectorAll('[data-goto]')].find(b => b.textContent.includes('Decaying')).click()`,
-  )
-  await new Promise((r) => setTimeout(r, 100))
-  assert.equal(await selected(page), 'workflows')
   await page.close()
 })
 
@@ -176,21 +217,21 @@ test('a tab carries a count, so nothing has to be opened to be noticed', skip, a
 
 test('the tablist is keyboard navigable', skip, async () => {
   const page = await open()
-  await page.focus('#tab-activity')
+  await page.focus('#tab-workflows')
   await page.keyboard.press('ArrowRight')
   await new Promise((r) => setTimeout(r, 80))
-  assert.equal(await selected(page), 'workflows')
+  assert.equal(await selected(page), 'runs')
   await page.keyboard.press('ArrowLeft')
   await new Promise((r) => setTimeout(r, 80))
-  assert.equal(await selected(page), 'activity')
+  assert.equal(await selected(page), 'workflows')
   await page.close()
 })
 
-test('an unknown hash falls back to Activity rather than showing nothing', skip, async () => {
+test('an unknown hash falls back rather than showing nothing', skip, async () => {
   const page = await browser.newPage()
   await page.goto(`http://127.0.0.1:${PORT}/#nonsense`, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(`document.querySelectorAll('#strip .stat').length > 0`, { timeout: 8000 })
-  assert.equal(await selected(page), 'activity')
+  await page.waitForFunction(`document.querySelectorAll('.wf').length > 0`, { timeout: 8000 })
+  assert.equal(await selected(page), 'workflows')
   assert.equal(
     await page.evaluate(`[...document.querySelectorAll('[role="tabpanel"]')].filter(p => !p.hidden).length`),
     1,

@@ -383,3 +383,51 @@ export function removeStep(workflowId: string, stepId: string): Workflow {
   clearStepMatch(workflowId, stepId)
   return saveWorkflow({ ...wf, steps })
 }
+
+/* -------------------------------------------------------------- run history */
+
+export interface RunHistory {
+  workflowId: string
+  total: number
+  ok: number
+  failed: number
+  lastAt: string | null
+  /** Most recent runs, newest last, as statuses. Enough to draw a strip and see
+   *  whether the failures are recent or ancient. */
+  recent: string[]
+}
+
+/**
+ * Per-workflow run counts.
+ *
+ * A dashboard that lists eight identical "done · 2d ago" rows has printed a log
+ * and called it a summary. What a person wants from a history is the shape of
+ * it: how many, how many worked, when it last ran.
+ */
+export function runHistory(limitPerWorkflow = 20): Map<string, RunHistory> {
+  const rows = open()
+    .prepare(
+      `SELECT workflow_id, status, updated_at
+         FROM job
+        ORDER BY created_at DESC
+        LIMIT 500`,
+    )
+    .all() as Array<Record<string, unknown>>
+
+  const out = new Map<string, RunHistory>()
+  for (const r of rows) {
+    const id = String(r.workflow_id)
+    const status = String(r.status)
+    let entry = out.get(id)
+    if (!entry) {
+      entry = { workflowId: id, total: 0, ok: 0, failed: 0, lastAt: null, recent: [] }
+      out.set(id, entry)
+    }
+    entry.total += 1
+    if (status === 'done') entry.ok += 1
+    else if (status === 'failed' || status === 'cancelled') entry.failed += 1
+    if (!entry.lastAt) entry.lastAt = String(r.updated_at)
+    if (entry.recent.length < limitPerWorkflow) entry.recent.unshift(status)
+  }
+  return out
+}
