@@ -4,7 +4,7 @@
  * are different and both are worth keeping.
  */
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync, existsSync, readFileSync, copyFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, copyFileSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { blobPath } from '../paths.ts'
 import * as repo from '../db/repo.ts'
@@ -84,4 +84,31 @@ export function read(asset: Asset): Buffer {
 export function attach(asset: Asset, destination: string): void {
   mkdirSync(dirname(destination), { recursive: true })
   copyFileSync(blobPath(asset.sha256), destination)
+}
+
+/**
+ * Delete an asset, and the bytes behind it if nothing else is using them.
+ *
+ * Not a plain DELETE, because storage is content-addressed: the same image
+ * arriving twice is one file and two rows, with two different prompts. Removing
+ * either must not pull the file out from under the other. The row goes first,
+ * so the count that follows is the count of what is left.
+ *
+ * A run that produced an asset is left alone. The asset is the output; the job
+ * is the record of what happened, and deleting a picture should not rewrite
+ * history.
+ */
+export function remove(id: string): boolean {
+  const asset = repo.getAsset(id)
+  if (!asset) return false
+
+  repo.deleteAsset(id)
+
+  if (repo.assetsWithSha(asset.sha256) === 0) {
+    const path = blobPath(asset.sha256)
+    // Missing is fine: a blob can already be gone if the store was pruned by
+    // hand, and failing the delete over it would strand the row forever.
+    if (existsSync(path)) unlinkSync(path)
+  }
+  return true
 }

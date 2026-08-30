@@ -468,3 +468,16 @@ export function runsByDay(days = 14): Array<{ day: string; ok: number; failed: n
   }
   return out
 }
+
+/** How many asset rows point at the same bytes. Storage is content-addressed,
+ *  so this is the question that decides whether a blob can go. */
+export function assetsWithSha(sha256: string): number {
+  const row = open()
+    .prepare(`SELECT COUNT(*) AS n FROM asset WHERE sha256 = ?`)
+    .get(sha256) as { n: number }
+  return Number(row.n)
+}
+
+export function deleteAsset(id: string): boolean {
+  return open().prepare(`DELETE FROM asset WHERE id = ?`).run(id).changes > 0
+}

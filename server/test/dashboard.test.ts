@@ -450,3 +450,84 @@ test('success is not drawn in the colour reserved for failure', skip, async () =
   assert.notEqual(succeeded, failed, 'succeeded and failed need different swatches')
   await page.close()
 })
+
+test('an asset can be deleted from the viewer, and the grid follows', skip, async () => {
+  const assets = await import('../src/core/assets.ts')
+  const doomed = assets.store(Buffer.from('bytes-for-the-delete-test-' + Date.now()), {
+    mime: 'image/png',
+    prompt: 'about to be deleted',
+  })
+  repo.setAssetDescription(doomed.id, 'ZZZ delete me')
+
+  const page = await open()
+  // Confirm is a native dialog; accept it the way a person would.
+  page.on('dialog', (d: any) => d.accept())
+
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets [data-asset]').length > 0`, { timeout: 8000 })
+
+  const before = (await page.evaluate(`document.querySelectorAll('#assets [data-asset]').length`)) as number
+
+  // Newest first, so the one just stored is at index 0.
+  await page.evaluate(`document.querySelectorAll('#assets [data-asset]')[0].click()`)
+  await page.waitForFunction(`document.querySelector('#viewer').open`, { timeout: 4000 })
+  await page.click('#v-delete')
+  await new Promise((r) => setTimeout(r, 900))
+
+  assert.equal(repo.getAsset(doomed.id), null, 'the asset is gone from the database')
+  assert.equal(await page.evaluate(`document.querySelector('#viewer').open`), false, 'the viewer closes')
+  const after = (await page.evaluate(`document.querySelectorAll('#assets [data-asset]').length`)) as number
+  assert.equal(after, before - 1, 'and the grid refreshes without it')
+  await page.close()
+})
+
+test('deleting cannot be triggered without confirming', skip, async () => {
+  const assets = await import('../src/core/assets.ts')
+  const spared = assets.store(Buffer.from('bytes-that-should-survive-' + Date.now()), {
+    mime: 'image/png',
+    prompt: 'should survive',
+  })
+
+  const page = await open()
+  page.on('dialog', (d: any) => d.dismiss())
+
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets [data-asset]').length > 0`, { timeout: 8000 })
+  await page.evaluate(`document.querySelectorAll('#assets [data-asset]')[0].click()`)
+  await page.waitForFunction(`document.querySelector('#viewer').open`, { timeout: 4000 })
+  await page.click('#v-delete')
+  await new Promise((r) => setTimeout(r, 700))
+
+  assert.ok(repo.getAsset(spared.id), 'declining the prompt must leave the asset alone')
+  await page.close()
+})
+
+test('an asset is addressed by id, so a reordering grid cannot delete the wrong one', skip, async () => {
+  // The grid was keyed on array position. It is rebuilt on every state frame,
+  // so an index captured at render time can point somewhere else by the time it
+  // is clicked — survivable when the only thing a click did was open a viewer,
+  // not once one of the buttons deletes.
+  const assets = await import('../src/core/assets.ts')
+  const keep = assets.store(Buffer.from('must-survive-' + Date.now()), { mime: 'image/png' })
+  repo.setAssetDescription(keep.id, 'the one that must survive')
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets [data-asset]').length > 0`, { timeout: 8000 })
+
+  // Every handle is an id, not a number.
+  const handles = (await page.evaluate(
+    `[...document.querySelectorAll('#assets [data-asset]')].map(e => e.dataset.asset)`,
+  )) as string[]
+  assert.ok(handles.length > 0)
+  for (const h of handles) {
+    assert.match(h, /^[0-9a-f-]{36}$/, `expected an asset id, got ${JSON.stringify(h)}`)
+  }
+
+  // Opening by id gets that asset, whatever the grid has done since.
+  await page.evaluate(`document.querySelector('[data-asset="${keep.id}"]').click()`)
+  await page.waitForFunction(`document.querySelector('#viewer').open`, { timeout: 4000 })
+  const shown = await page.evaluate(`document.querySelector('#v-desc').value`)
+  assert.equal(shown, 'the one that must survive')
+  await page.close()
+})

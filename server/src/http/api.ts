@@ -209,6 +209,12 @@ export const routes: Record<string, Handler> = {
     return { asset }
   },
 
+  '/api/assets.delete': (b) => {
+    const id = b?.id ?? missing('id')
+    if (!assets.remove(id)) throw new Error(`no asset ${id}`)
+    return { deleted: id }
+  },
+
   '/api/assets.attach': (b) => {
     const a = repo.getAsset(b?.id ?? missing('id'))
     if (!a) throw new Error(`no asset ${b.id}`)

@@ -234,6 +234,8 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
   .btn.primary:hover{filter:brightness(1.2)}
   .btn:disabled{opacity:.45;cursor:default}
+  .btn.danger{margin-left:auto;color:var(--bad);border-color:transparent}
+  .btn.danger:hover{border-color:var(--bad);background:var(--bad-soft)}
   .row{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line-2);
     font-size:13px}
   .row:last-child{border-bottom:0}
@@ -478,6 +480,9 @@ export const dashboardHtml = (version: string) => `<!doctype html>
         <button class="btn" id="v-open">Open original</button>
         <button class="btn" id="v-close">Close</button>
         <span class="saved" id="v-saved">Saved</span>
+        <!-- Pushed to the far end and drawn as a danger, because it is the one
+             control here that cannot be undone. -->
+        <button class="btn danger" id="v-delete">Delete</button>
       </div>
     </div>
   </div>
@@ -668,11 +673,11 @@ function workflowCard(w) {
     note + steps + '</article>'
 }
 
-function assetCard(a, i) {
+function assetCard(a) {
   const what = a.description
     ? '<b>' + esc(a.description) + '</b>'
     : '<b class="none">No description yet</b>'
-  return '<button class="asset" data-asset="' + i + '">' +
+  return '<button class="asset" data-asset="' + esc(a.id) + '">' +
     (a.mime.indexOf('image/') === 0
       ? '<img class="thumb" loading="lazy" src="/asset/' + a.id + '" alt="">'
       : '<span class="thumb"></span>') +
@@ -780,8 +785,8 @@ function render(d) {
     : '<div style="color:var(--faint);font-size:13px">Nothing recorded yet.</div>'
 
   $('ov-assets').innerHTML = d.assets.length
-    ? '<div class="strip">' + d.assets.slice(0, 10).map((a, i) =>
-        '<button data-asset="' + i + '" title="' + esc(a.description || a.prompt || '') + '">' +
+    ? '<div class="strip">' + d.assets.slice(0, 10).map((a) =>
+        '<button data-asset="' + esc(a.id) + '" title="' + esc(a.description || a.prompt || '') + '">' +
         '<img loading="lazy" src="/asset/' + a.id + '" alt=""></button>').join('') + '</div>'
     : '<div style="color:var(--faint);font-size:13px">Nothing produced yet.</div>'
 
@@ -822,7 +827,10 @@ function render(d) {
   // the moment anything else edits one.
   if ($('viewer').open && openAsset != null) {
     const fresh = d.assets.find(a => a.id === openAsset)
+    // Deleted from somewhere else — another tab, or an agent. Do not sit there
+    // showing an asset that no longer exists.
     if (fresh) fillViewer(fresh)
+    else $('viewer').close()
   }
 }
 
@@ -863,6 +871,22 @@ function openViewer(a) {
 }
 
 $('v-close').onclick = () => $('viewer').close()
+$('v-delete').onclick = async () => {
+  if (!openAsset) return
+  const a = latest && latest.assets.find(x => x.id === openAsset)
+  const what = a && a.description ? '\u201c' + a.description.slice(0, 60) + '\u201d' : 'this asset'
+  // The bytes are gone for good, and saying so is the honest way to ask.
+  if (!confirm('Delete ' + what + '? The file is removed and cannot be recovered.')) return
+  $('v-delete').disabled = true
+  try {
+    await post('/api/assets.delete', { id: openAsset })
+    $('viewer').close()
+  } catch (e) {
+    alert('Could not delete: ' + e.message)
+  } finally {
+    $('v-delete').disabled = false
+  }
+}
 $('v-open').onclick = () => { if (openAsset) window.open('/asset/' + openAsset, '_blank') }
 $('v-save').onclick = async () => {
   if (!openAsset) return
@@ -897,7 +921,15 @@ document.addEventListener('click', async (e) => {
   if (goto) return goTab(goto.dataset.goto)
 
   const asset = e.target.closest('[data-asset]')
-  if (asset && latest) return openViewer(latest.assets[Number(asset.dataset.asset)])
+  if (asset && latest) {
+    // By id, never by position. The grid is rebuilt on every state frame, so an
+    // index captured at render time can point at a different asset by the time
+    // it is clicked — which was survivable when the only thing you could do was
+    // look, and is not now that one of the buttons deletes.
+    const found = latest.assets.find(a => a.id === asset.dataset.asset)
+    if (found) openViewer(found)
+    return
+  }
 
   const activate = e.target.dataset && e.target.dataset.activate
   if (activate) {

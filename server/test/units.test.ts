@@ -228,3 +228,66 @@ test('every route in the table is classified, so a new one cannot be forgotten',
     assert.equal(typeof mutates(path), 'boolean', `${path} must classify`)
   }
 })
+
+/* ------------------------------------------------------------ deleting */
+
+test('deleting an asset removes the row and the file behind it', async () => {
+  const assets = await import('../src/core/assets.ts')
+  const { blobPath } = await import('../src/paths.ts')
+  const { existsSync } = await import('node:fs')
+
+  const a = assets.store(Buffer.from('bytes-that-only-one-asset-uses'), { mime: 'image/png' })
+  assert.ok(existsSync(blobPath(a.sha256)))
+
+  assert.equal(assets.remove(a.id), true)
+  assert.equal(repo.getAsset(a.id), null)
+  assert.equal(existsSync(blobPath(a.sha256)), false, 'the blob goes with the last asset holding it')
+})
+
+test('deleting one of two assets sharing a blob keeps the file', async () => {
+  // Storage is content-addressed: the same image arriving twice is one file and
+  // two rows. Deleting either must not pull the file out from under the other —
+  // which is the whole reason this is not just a DELETE.
+  const assets = await import('../src/core/assets.ts')
+  const { blobPath } = await import('../src/paths.ts')
+  const { existsSync } = await import('node:fs')
+
+  const bytes = Buffer.from('bytes-shared-by-two-assets')
+  const first = assets.store(bytes, { mime: 'image/png', prompt: 'first' })
+  const second = assets.store(bytes, { mime: 'image/png', prompt: 'second' })
+  assert.equal(first.sha256, second.sha256)
+
+  assert.equal(assets.remove(first.id), true)
+  assert.equal(repo.getAsset(first.id), null)
+  assert.ok(repo.getAsset(second.id), 'the other asset survives')
+  assert.ok(existsSync(blobPath(bytes && second.sha256)), 'and so does the file it needs')
+
+  assets.remove(second.id)
+  assert.equal(existsSync(blobPath(second.sha256)), false, 'gone once nothing references it')
+})
+
+test('deleting an asset that does not exist is false, not a throw', async () => {
+  const assets = await import('../src/core/assets.ts')
+  assert.equal(assets.remove('no-such-asset'), false)
+})
+
+test('deleting an asset leaves the job that produced it alone', async () => {
+  // The asset is the output; the run is the record of what happened. Removing a
+  // picture should not rewrite history.
+  const assets = await import('../src/core/assets.ts')
+  const wf = repo.saveWorkflow({
+    name: 'delete-keeps-history',
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'image',
+    steps: [{ id: 's', kind: 'click', selectors: [{ strategy: 'id', value: '#a', score: 92 }], timeoutMs: 1000 }],
+  } as never)
+  const job = repo.createJob(wf.id, {}, 1)
+  const a = assets.store(Buffer.from('an-output-of-a-run'), { mime: 'image/png', jobId: job.id })
+
+  assets.remove(a.id)
+  assert.ok(repo.getJob(job.id), 'the run is still there')
+})
