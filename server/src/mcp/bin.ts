@@ -9,13 +9,123 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { call } from './client.ts'
+import { bindProject, boundProject, call, NeedsProject, requireProject } from './client.ts'
 import type { Asset, Job, Workflow } from '../types.ts'
 
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s }] })
 const fail = (s: string) => ({ content: [{ type: 'text' as const, text: s }], isError: true })
 
+/** How a NeedsProject refusal is put to the model: ask, do not guess. */
+const askForProject = (choices: Array<{ slug: string; name: string }>) =>
+  fail(
+    'This session is not tied to a project yet, and there is more than one.\n\n' +
+      'Ask the person you are working with which of these to use, then call use_project ' +
+      'with it. Do not choose for them — putting one client\'s work in another client\'s ' +
+      'project is not a mistake anyone notices quickly.\n\n' +
+      choices.map((p) => `  • ${p.slug} — ${p.name}`).join('\n'),
+  )
+
 const server = new McpServer({ name: 'atelier', version: '0.1.0' })
+
+/**
+ * Every tool gets the same error handling, applied once here rather than
+ * repeated in twenty-two handlers where one would eventually be forgotten.
+ *
+ * The case that matters is NeedsProject: a session that has not been told where
+ * it is working must stop and ask, not pick.
+ */
+const registerTool = server.registerTool.bind(server)
+server.registerTool = ((name: string, config: unknown, handler: (...a: never[]) => unknown) =>
+  registerTool(name as never, config as never, (async (...args: never[]) => {
+    try {
+      return await (handler as (...a: never[]) => Promise<unknown>)(...args)
+    } catch (e) {
+      if (e instanceof NeedsProject) return askForProject(e.choices)
+      return fail((e as Error).message)
+    }
+  }) as never)) as typeof server.registerTool
+
+/* -------------------------------------------------------------- projects */
+
+server.registerTool(
+  'list_projects',
+  {
+    title: 'List projects',
+    description:
+      'Every project this machine holds, with what each contains and which one this session is working in. Projects separate one body of work from another — different clients, different sites — and workflows, runs and assets all belong to exactly one. Call this when you do not know where you are.',
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const { projects, active } = await call<{ projects: any[]; active: any }>('/api/projects.list', {})
+      const here = boundProject()
+      return text(
+        projects
+          .map((p) => {
+            const c = p.contents
+            const mark = here && here.id === p.id ? '→ ' : '  '
+            const dash = active?.id === p.id ? '   [the dashboard is showing this one]' : ''
+            return `${mark}${p.slug} — ${p.name}\n      ${c.workflows} workflows · ${c.jobs} runs · ${c.assets} assets · ${c.drafts} recordings${dash}`
+          })
+          .join('\n') +
+          (here
+            ? `\n\nThis session is working in "${here.slug}".`
+            : '\n\nThis session is not tied to a project yet. Ask which one to use, then call use_project.'),
+      )
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
+  'use_project',
+  {
+    title: 'Work in a project for this session',
+    description:
+      "Tie this session to a project. Everything afterwards — listing workflows, running them, storing assets — happens inside it. This is per session and does not move the dashboard: the person you are working with may be looking at something else, deliberately. Ask them which project before calling this; do not pick one yourself.",
+    inputSchema: { project: z.string().describe('Project slug, name, or id, from list_projects.') },
+  },
+  async ({ project }) => {
+    try {
+      const { projects } = await call<{ projects: any[] }>('/api/projects.list', {})
+      const hit = projects.find((p) => p.slug === project || p.id === project || p.name === project)
+      if (!hit) {
+        return fail(
+          `No project "${project}". There is: ${projects.map((p) => p.slug).join(', ')}`,
+        )
+      }
+      bindProject({ id: hit.id, name: hit.name, slug: hit.slug })
+      return text(`Working in "${hit.name}" (${hit.slug}) for the rest of this session.`)
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
+
+server.registerTool(
+  'create_project',
+  {
+    title: 'Create a project',
+    description:
+      'Start a new body of work — a different client, a different site. It does not become the session\'s project or the dashboard\'s; say so and let the human decide when to move. Existing work is never moved into it.',
+    inputSchema: {
+      name: z.string().describe('Human-readable, e.g. "Acme redesign". The slug is derived from it.'),
+      note: z.string().optional().describe('One line on what this project is for.'),
+    },
+  },
+  async ({ name, note }) => {
+    try {
+      const { project } = await call<{ project: any }>('/api/projects.create', { name, note })
+      return text(
+        `Created "${project.name}" (${project.slug}). Nothing has moved into it, and neither this ` +
+          `session nor the dashboard has switched to it.`,
+      )
+    } catch (e) {
+      return fail((e as Error).message)
+    }
+  },
+)
 
 /* ------------------------------------------------------------- discovery */
 
@@ -29,13 +139,17 @@ server.registerTool(
   },
   async () => {
     try {
+      const here = boundProject()
       const o = await call<any>('/api/overview', {})
       const browsers = o.browsers.length
         ? o.browsers.map((b: any) => `${b.label} (${b.browser})`).join(', ')
         : 'none — the extension is not connected'
       const blocked = o.jobs.filter((j: any) => j.status === 'blocked')
       return text(
-        `Daemon ${o.version} on 127.0.0.1:${o.port}, up ${Math.round(o.uptimeSeconds / 60)}m\n` +
+        (here
+          ? `Working in project "${here.slug}" (${here.name}).\n`
+          : `This session is not tied to a project yet — call list_projects, ask which one, then use_project.\n`) +
+          `Daemon ${o.version} on 127.0.0.1:${o.port}, up ${Math.round(o.uptimeSeconds / 60)}m\n` +
           `Browsers attached: ${browsers}\n` +
           `Workflows: ${o.counts.workflows} active · Drafts awaiting review: ${o.counts.drafts}\n` +
           `Jobs: ${o.jobs.length} in flight (${blocked.length} blocked) · Assets: ${o.counts.assets}` +

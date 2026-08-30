@@ -46,6 +46,28 @@ const missing = (name: string) => {
 }
 
 export const routes: Record<string, Handler> = {
+  /* ------------------------------------------------------------ projects */
+
+  '/api/projects.list': () => ({
+    projects: repo.listProjects().map((p) => ({ ...p, contents: repo.projectContents(p.id) })),
+    active: repo.activeProject(),
+  }),
+
+  '/api/projects.create': (b) => ({ project: repo.createProject(b?.name ?? missing('name'), b?.note) }),
+
+  '/api/projects.rename': (b) => ({
+    project: repo.renameProject(b?.id ?? missing('id'), b?.name ?? missing('name')),
+  }),
+
+  /** The switch. Everything the dashboard and the extension show follows this. */
+  '/api/projects.activate': (b) => ({ project: repo.setActiveProject(b?.id ?? missing('id')) }),
+
+  '/api/projects.delete': (b) => {
+    const id = b?.id ?? missing('id')
+    if (!repo.deleteProject(id)) throw new Error(`no project ${id}`)
+    return { deleted: id }
+  },
+
   '/api/health': (_b, d) => ({
     ok: true,
     version: d.version,

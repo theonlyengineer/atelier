@@ -127,3 +127,7 @@ removes the only signal that a workflow is dying.
 **Never build a selector from an element's current value.** It changes between runs, so
 the selector is wrong by construction — and on a password field it writes the secret into
 the workflow. See `docs/security.md`.
+
+**`http/dashboard.ts` is one big template literal, so no backticks inside it.** A backtick
+in a comment closes the string and the build reports a syntax error somewhere further
+down, which is a confusing place to start looking. Quote identifiers with plain words.

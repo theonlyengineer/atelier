@@ -19,6 +19,11 @@
  * render without reaching the network is a dashboard that fails exactly when
  * you need it. It updates over Server-Sent Events, so there is nothing to
  * refresh and no polling.
+ *
+ * One editing hazard, since this whole page is a TypeScript template literal:
+ * a backtick anywhere inside it — including in a comment — closes the string.
+ * The build catches it as a syntax error twenty lines later, which is a
+ * confusing place to be told. Do not quote identifiers with backticks in here.
  */
 
 export const dashboardHtml = (version: string) => `<!doctype html>
@@ -132,6 +137,32 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   /* The health of the thing itself, parked at the bottom of the nav where a
      product would put the account — because "is it even connected" is the
      ambient question, not a section you navigate to. */
+  /* ---- project switcher ---------------------------------------------- */
+  .switcher{position:relative;padding:0 4px}
+  .switcher > button{all:unset;cursor:pointer;display:flex;align-items:center;gap:9px;width:100%;
+    padding:9px 11px;border-radius:10px;border:1px solid var(--line);background:var(--sunk);
+    font-size:13px;font-weight:600;box-sizing:border-box}
+  .switcher > button:hover{border-color:var(--faint)}
+  .proj-dot{width:7px;height:7px;border-radius:2px;background:var(--accent);flex:none}
+  .proj-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .proj-caret{color:var(--faint);font-size:10px}
+  .proj-menu{position:absolute;left:4px;right:4px;top:calc(100% + 5px);z-index:20;margin:0;padding:5px;
+    list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:11px;
+    max-height:320px;overflow:auto}
+  .proj-menu li button{all:unset;cursor:pointer;display:block;width:100%;box-sizing:border-box;
+    padding:8px 10px;border-radius:8px;font-size:13px}
+  .proj-menu li button:hover{background:var(--sunk)}
+  .proj-menu li button[aria-selected="true"]{background:var(--ink);color:var(--page);font-weight:600}
+  .proj-menu .meta{display:block;font-size:10.5px;color:var(--faint);font-family:var(--mono);
+    margin-top:2px}
+  .proj-menu li button[aria-selected="true"] .meta{color:var(--page);opacity:.7}
+
+  .newproj{display:flex;gap:8px;flex-wrap:wrap}
+  .newproj input{flex:1;min-width:180px;font:inherit;font-size:13px;padding:8px 12px;
+    border-radius:9px;border:1px solid var(--line);background:var(--sunk);color:var(--ink)}
+  .newproj input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  .hint{font-size:12px;color:var(--faint);margin:10px 0 0;line-height:1.55}
+
   .sidestat{margin-top:auto;background:var(--sunk);border-radius:var(--r-sm);padding:13px 14px}
   .sidestat .dotline{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12.5px}
   .sidestat i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
@@ -349,6 +380,20 @@ export const dashboardHtml = (version: string) => `<!doctype html>
       <div><b>Atelier</b><br><span>v${version}</span></div>
     </div>
 
+    <!--
+      The switcher sits directly under the wordmark, where an AWS console puts
+      its region: it is the frame everything below is read inside, so it belongs
+      above the navigation rather than in it.
+    -->
+    <div class="switcher">
+      <button id="proj-btn" aria-haspopup="listbox" aria-expanded="false">
+        <span class="proj-dot"></span>
+        <span class="proj-name" id="proj-name">…</span>
+        <span class="proj-caret">▾</span>
+      </button>
+      <ul class="proj-menu" id="proj-menu" role="listbox" hidden></ul>
+    </div>
+
     <p class="navlabel">Main menu</p>
     <nav class="nav" id="nav" role="tablist" aria-label="Sections">
       <button role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview">
@@ -366,6 +411,10 @@ export const dashboardHtml = (version: string) => `<!doctype html>
       <button role="tab" id="tab-assets" data-tab="assets" aria-controls="panel-assets">
         <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m4 17 4.5-4.5 3.5 3.5 3-3L20 18"/></svg>
         Assets
+      </button>
+      <button role="tab" id="tab-projects" data-tab="projects" aria-controls="panel-projects">
+        <svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2l1.8 2.2h8A2.5 2.5 0 0 1 21 9.7v7.8A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>
+        Projects
       </button>
       <button role="tab" id="tab-log" data-tab="log" aria-controls="panel-log">
         <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8.5 9h7M8.5 13h7M8.5 17h4"/></svg>
@@ -451,6 +500,19 @@ export const dashboardHtml = (version: string) => `<!doctype html>
       <div id="assets-empty"></div>
     </div>
 
+    <div role="tabpanel" id="panel-projects" aria-labelledby="tab-projects" hidden>
+      <section class="card pad">
+        <div class="sec-head"><h2>New project</h2></div>
+        <form class="newproj" id="proj-form">
+          <input id="proj-input" placeholder="Acme redesign" autocomplete="off" aria-label="Project name">
+          <button class="btn primary" type="submit">Create</button>
+        </form>
+        <p class="hint">Nothing moves into it, and neither this page nor an agent session
+          switches to it. Both are deliberate steps.</p>
+      </section>
+      <div id="projects"></div>
+    </div>
+
     <div role="tabpanel" id="panel-log" aria-labelledby="tab-log" hidden>
       <pre class="log" id="log">…</pre>
       <p class="paths" id="paths"></p>
@@ -508,12 +570,13 @@ const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.round(n /
 
 /* -------------------------------------------------------------- tabs --- */
 
-const TABS = ['overview', 'workflows', 'runs', 'assets', 'log']
+const TABS = ['overview', 'workflows', 'runs', 'assets', 'projects', 'log']
 const TITLES = {
   overview: ['Overview', 'A little of everything, so the first screen answers the question'],
   workflows: ['Workflows', 'What this machine can do, and whether it still can'],
   runs: ['Runs', 'What has run, and how it went'],
   assets: ['Assets', 'What the workflows produced'],
+  projects: ['Projects', 'Separate bodies of work — workflows, runs and assets belong to exactly one'],
   log: ['Log', 'The daemon, verbatim'],
 }
 
@@ -819,6 +882,44 @@ function render(d) {
   $('assets-empty').innerHTML = d.assets.length ? ''
     : '<div class="empty"><b>Nothing produced yet</b>Assets a workflow captures land here, with the prompt that made them.</div>'
 
+  /* -- projects ---------------------------------------------------------- */
+  const projects = d.projects || []
+  // Not named active: that is already the list of running jobs in this function.
+  const here = d.activeProject
+  $('proj-name').textContent = here ? here.name : '—'
+
+  $('proj-menu').innerHTML = projects.map(p =>
+    '<li><button role="option" data-switch="' + esc(p.id) + '"' +
+    (here && p.id === here.id ? ' aria-selected="true"' : '') + '>' +
+    esc(p.name) +
+    '<span class="meta">' + p.contents.workflows + ' workflows · ' + p.contents.assets + ' assets</span>' +
+    '</button></li>').join('')
+
+  $('projects').innerHTML = projects.map(p => {
+    const c = p.contents
+    const isActive = here && p.id === here.id
+    const empty = c.workflows + c.jobs + c.assets + c.drafts === 0
+    return '<article class="wf' + (isActive ? ' pending' : '') + '"><div class="wf-top">' +
+      '<span class="wf-name">' + esc(p.slug) + '</span>' +
+      (isActive ? '<span class="tag go">showing</span>' : '') +
+      '<span class="wf-actions">' +
+      (isActive ? '' : '<button class="btn" data-switch="' + esc(p.id) + '">Switch to</button>') +
+      '<button class="btn" data-rename="' + esc(p.id) + '">Rename</button>' +
+      // Only offered when it is actually possible: a button that always
+      // refuses teaches people to ignore buttons.
+      (!isActive && empty && projects.length > 1
+        ? '<button class="btn danger" data-delproj="' + esc(p.id) + '">Delete</button>' : '') +
+      '</span></div>' +
+      '<p class="wf-desc">' + esc(p.name) + (p.note ? ' — ' + esc(p.note) : '') + '</p>' +
+      '<div class="wf-meta"><span>' + plural(c.workflows, 'workflow') + '</span>' +
+      '<span>' + plural(c.jobs, 'run') + '</span>' +
+      '<span>' + plural(c.assets, 'asset') + '</span>' +
+      '<span>' + plural(c.drafts, 'recording') + '</span></div>' +
+      (empty || isActive ? '' :
+        '<div class="note info">Holds work, so it cannot be deleted until that is moved or removed.</div>') +
+      '</article>'
+  }).join('')
+
   /* -- log --------------------------------------------------------------- */
   $('log').textContent = d.log || '(empty)'
   $('paths').textContent = 'State in ' + d.home
@@ -905,6 +1006,33 @@ $('v-save').onclick = async () => {
 $('viewer').addEventListener('click', (e) => { if (e.target === $('viewer')) $('viewer').close() })
 $('viewer').addEventListener('close', () => { openAsset = null })
 
+/* ---------------------------------------------------------- projects --- */
+
+const closeMenu = () => {
+  $('proj-menu').hidden = true
+  $('proj-btn').setAttribute('aria-expanded', 'false')
+}
+$('proj-btn').onclick = (e) => {
+  e.stopPropagation()
+  const open = $('proj-menu').hidden
+  $('proj-menu').hidden = !open
+  $('proj-btn').setAttribute('aria-expanded', String(open))
+}
+document.addEventListener('click', () => closeMenu())
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu() })
+
+$('proj-form').onsubmit = async (e) => {
+  e.preventDefault()
+  const name = $('proj-input').value.trim()
+  if (!name) return
+  try {
+    await post('/api/projects.create', { name })
+    $('proj-input').value = ''
+  } catch (err) {
+    alert('Could not create: ' + err.message)
+  }
+}
+
 /* ----------------------------------------------------------- actions --- */
 
 async function post(path, body) {
@@ -917,6 +1045,35 @@ async function post(path, body) {
 }
 
 document.addEventListener('click', async (e) => {
+  const sw = e.target.closest('[data-switch]')
+  if (sw) {
+    closeMenu()
+    // Switching is the whole frame changing, so it is worth being explicit that
+    // this moves the page and not any agent session already working elsewhere.
+    try { await post('/api/projects.activate', { id: sw.dataset.switch }) }
+    catch (err) { alert('Could not switch: ' + err.message) }
+    return
+  }
+
+  const rn = e.target.closest('[data-rename]')
+  if (rn) {
+    const current = (latest.projects.find(p => p.id === rn.dataset.rename) || {}).name || ''
+    const name = prompt('Rename this project', current)
+    if (!name || name === current) return
+    try { await post('/api/projects.rename', { id: rn.dataset.rename, name }) }
+    catch (err) { alert('Could not rename: ' + err.message) }
+    return
+  }
+
+  const dp = e.target.closest('[data-delproj]')
+  if (dp) {
+    const p = latest.projects.find(x => x.id === dp.dataset.delproj)
+    if (!confirm('Delete the project “' + (p ? p.name : '') + '”? It is empty, so nothing is lost.')) return
+    try { await post('/api/projects.delete', { id: dp.dataset.delproj }) }
+    catch (err) { alert('Could not delete: ' + err.message) }
+    return
+  }
+
   const goto = e.target.closest('[data-goto]')
   if (goto) return goTab(goto.dataset.goto)
 

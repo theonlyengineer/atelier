@@ -69,6 +69,8 @@ export interface WorkflowInput {
 
 export interface Workflow {
   id: string
+  /** Everything belongs to exactly one project. */
+  projectId: string
   name: string
   description: string
   status: WorkflowStatus
@@ -88,6 +90,7 @@ export type JobStatus = 'queued' | 'running' | 'blocked' | 'done' | 'failed' | '
 
 export interface Job {
   id: string
+  projectId: string
   workflowId: string
   workflowName: string
   inputs: Record<string, string>

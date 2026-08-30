@@ -35,6 +35,7 @@ export interface RecordedAction {
 
 export interface DraftInput {
   name: string
+  projectId?: string
   origins: string[]
   raw: { actions?: RecordedAction[] } | unknown
 }
@@ -281,6 +282,10 @@ export function proposeWorkflow(draft: DraftInput): Workflow {
   const now = new Date().toISOString()
   return {
     id: randomUUID(),
+    // Left blank here on purpose: a proposal is a pure function of a recording
+    // and does not get to decide where it lands. saveWorkflow stamps the project
+    // when it is persisted.
+    projectId: draft.projectId ?? '',
     name: draft.name,
     description: describe(draft.name, steps, inputs),
     // Never active. A recording that can run the moment it stops is a recording

@@ -531,3 +531,98 @@ test('an asset is addressed by id, so a reordering grid cannot delete the wrong 
   assert.equal(shown, 'the one that must survive')
   await page.close()
 })
+
+/* ------------------------------------------------------------ projects */
+
+test('the switcher names the project everything below is being read inside', skip, async () => {
+  const other = repo.createProject('Second Project')
+  const page = await open()
+
+  const shown = await page.evaluate(`document.querySelector('#proj-name').textContent`)
+  assert.equal(shown, repo.activeProject().name)
+
+  // The menu offers every project, marking where you are.
+  await page.click('#proj-btn')
+  await new Promise((r) => setTimeout(r, 150))
+  const options = (await page.evaluate(
+    `[...document.querySelectorAll('#proj-menu [data-switch]')].map(b => b.dataset.switch)`,
+  )) as string[]
+  assert.ok(options.includes(other.id), 'every project is switchable to')
+  assert.ok(options.includes(repo.activeProject().id))
+  await page.close()
+})
+
+test('switching changes what the whole page is showing', skip, async () => {
+  const a = repo.createProject('Switch Source')
+  const b = repo.createProject('Switch Target')
+
+  repo.setActiveProject(a.id)
+  repo.saveWorkflow({
+    name: 'only-in-source',
+    description: 'test',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [{ id: 's', kind: 'click', selectors: [{ strategy: 'id', value: '#a', score: 92 }], timeoutMs: 1000 }],
+  } as never)
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflows'`)
+  await page.waitForFunction(`document.querySelector('#workflows').innerText.includes('only-in-source')`, { timeout: 8000 })
+
+  await page.evaluate(`document.querySelector('[data-switch="${b.id}"]').click()`)
+  await page.waitForFunction(
+    `!document.querySelector('#workflows').innerText.includes('only-in-source')`,
+    { timeout: 8000 },
+  )
+  assert.equal(repo.activeProject().id, b.id, 'and the daemon agrees')
+  await page.close()
+})
+
+test('a project holding work offers no delete button at all', skip, async () => {
+  // A control that always refuses teaches people to ignore controls.
+  const full = repo.createProject('Holds Work')
+  repo.setActiveProject(full.id)
+  repo.saveWorkflow({
+    name: 'makes-it-non-empty',
+    description: 'test',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [{ id: 's', kind: 'click', selectors: [{ strategy: 'id', value: '#a', score: 92 }], timeoutMs: 1000 }],
+  } as never)
+  const empty = repo.createProject('Holds Nothing')
+  repo.setActiveProject(empty.id)
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#projects'`)
+  await page.waitForFunction(`document.querySelectorAll('#projects .wf').length > 0`, { timeout: 8000 })
+
+  assert.equal(
+    await page.evaluate(`!!document.querySelector('[data-delproj="${full.id}"]')`),
+    false,
+    'the one holding work cannot be deleted, so it is not offered',
+  )
+  // Nor the one you are standing in.
+  assert.equal(await page.evaluate(`!!document.querySelector('[data-delproj="${empty.id}"]')`), false)
+  await page.close()
+})
+
+test('a project can be created from the page', skip, async () => {
+  const page = await open()
+  await page.evaluate(`location.hash = '#projects'`)
+  await page.waitForFunction(`document.querySelector('#proj-form')`, { timeout: 8000 })
+
+  const name = 'Made From The Page ' + Date.now()
+  await page.type('#proj-input', name)
+  await page.click('#proj-form button[type=submit]')
+  await new Promise((r) => setTimeout(r, 900))
+
+  assert.ok(repo.listProjects().some((p) => p.name === name), 'it exists')
+  assert.notEqual(repo.activeProject().name, name, 'and creating did not silently move you into it')
+  await page.close()
+})

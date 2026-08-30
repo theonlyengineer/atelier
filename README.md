@@ -87,6 +87,28 @@ everything, with detail, for when something is wrong and you want to look at it.
 If the page will not load at all, the daemon is not running — `npm start`, or check
 `~/.atelier/atelierd.log`.
 
+## Projects
+
+Everything Atelier owns — workflows, runs, assets, recordings — belongs to exactly one
+project. A fresh install has one called **Default** and you can ignore all of this; the
+moment you are doing work for two different places, split them.
+
+The daemon has one **active project**, the way `kubectl` has one current context. The
+switcher at the top of the dashboard sidebar changes it, and it is what the browser
+extension records into — the side panel says which, so a recording cannot be filed
+somewhere nobody is looking without the screen having said so.
+
+**An agent session is separate, deliberately.** It binds to a project of its own with
+`use_project` and stays there: a session halfway through twenty minutes of work should
+not change project because somebody clicked a menu in another window. If the session has
+not been told where it is working and there is more than one project, **every tool
+refuses and asks the human** rather than guessing — putting one client's work in another
+client's project is not a mistake anyone notices quickly. Set `ATELIER_PROJECT` to pin a
+checkout to one.
+
+Workflow names are unique *per project*, so "the export workflow" is a name you can have
+once per client rather than once ever.
+
 ## Recording a workflow
 
 1. Open the site, click the Atelier icon, hit **Record a workflow**, name it.
@@ -130,7 +152,10 @@ panel — the other nineteen were fine.
 ## Using it from Claude Code
 
 ```
-atelier_status                → is the daemon up, is a browser attached, is anything rotting
+list_projects                 → what projects exist, and where this session is working
+use_project   project          → tie this session to one, for the rest of the session
+create_project name            → start a new body of work
+atelier_status                → where you are, is the daemon up, is anything rotting
 list_workflows                → what this machine can do
 get_workflow  name            → every step, with ids and health
 run_workflow  name, inputs    → replay it, wait, return the asset

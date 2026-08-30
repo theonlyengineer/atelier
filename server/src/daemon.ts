@@ -108,6 +108,8 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
   /** Everything the dashboard renders, in one snapshot. */
   const overview = () => ({
     version: VERSION,
+    projects: repo.listProjects().map((p) => ({ ...p, contents: repo.projectContents(p.id) })),
+    activeProject: repo.activeProject(),
     port,
     home: HOME,
     uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
@@ -318,7 +320,10 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     if (route && req.method === 'POST') {
       try {
         const body = await readJson(req)
-        const result = route(body, deps)
+        // A caller may name the project it means — an agent session bound
+        // somewhere other than where the dashboard is pointed. Absent that, the
+        // daemon's active project is the scope.
+        const result = repo.withProject((body as any)?.projectId, () => route(body, deps))
         // Anything that changed state has to reach the dashboard and the side
         // panel now, not on the next heartbeat.
         if (mutates(url.pathname)) pushState()

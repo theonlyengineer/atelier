@@ -22,9 +22,20 @@ CREATE TABLE IF NOT EXISTS profile (
   last_seen_at  TEXT
 );
 
+-- Everything Atelier owns belongs to exactly one project. One active project at
+-- a time, held in meta.active_project, the way kubectl holds a current context.
+CREATE TABLE IF NOT EXISTS project (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  slug       TEXT NOT NULL UNIQUE,
+  note       TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS workflow (
   id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL UNIQUE,
+  project_id  TEXT NOT NULL REFERENCES project(id),
+  name        TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   status      TEXT NOT NULL DEFAULT 'draft',
   origins     TEXT NOT NULL DEFAULT '[]',
@@ -33,11 +44,15 @@ CREATE TABLE IF NOT EXISTS workflow (
   steps       TEXT NOT NULL DEFAULT '[]',
   produces    TEXT NOT NULL DEFAULT 'none',
   created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL
+  updated_at  TEXT NOT NULL,
+  -- Scoped per project rather than globally: "the export workflow" is a name
+  -- you should be able to have once per client, not once ever.
+  UNIQUE (project_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS job (
   id             TEXT PRIMARY KEY,
+  project_id     TEXT NOT NULL REFERENCES project(id),
   workflow_id    TEXT NOT NULL REFERENCES workflow(id),
   inputs         TEXT NOT NULL DEFAULT '{}',
   status         TEXT NOT NULL DEFAULT 'queued',
@@ -64,6 +79,7 @@ CREATE INDEX IF NOT EXISTS job_event_job_idx ON job_event(job_id, id);
 
 CREATE TABLE IF NOT EXISTS asset (
   id            TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL REFERENCES project(id),
   sha256        TEXT NOT NULL,
   mime          TEXT NOT NULL,
   bytes         INTEGER NOT NULL,
@@ -84,6 +100,7 @@ CREATE INDEX IF NOT EXISTS asset_sha_idx ON asset(sha256);
 -- Raw recordings, before the validation pass turns them into a workflow.
 CREATE TABLE IF NOT EXISTS draft (
   id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL REFERENCES project(id),
   name        TEXT NOT NULL,
   profile_id  TEXT REFERENCES profile(id),
   origins     TEXT NOT NULL DEFAULT '[]',
@@ -105,3 +122,8 @@ CREATE TABLE IF NOT EXISTS step_health (
   at          TEXT NOT NULL,
   PRIMARY KEY (workflow_id, step_id)
 );
+
+-- The project_id indexes are created in db/index.ts, after the migration has
+-- added the columns. They cannot live here: this file runs first, and on an
+-- existing database CREATE TABLE IF NOT EXISTS is a no-op, so indexing a column
+-- the old table does not have yet fails the whole open.

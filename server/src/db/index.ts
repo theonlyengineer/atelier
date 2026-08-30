@@ -4,12 +4,13 @@
  * and run rather than deployed.
  */
 import { DatabaseSync } from 'node:sqlite'
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DB_PATH, ensureDirs } from '../paths.ts'
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 let db: DatabaseSync | null = null
 
@@ -57,6 +58,89 @@ function migrate(db: DatabaseSync): void {
 
   if (!columns('asset').includes('description')) {
     db.exec(`ALTER TABLE asset ADD COLUMN description TEXT`)
+  }
+
+  /* ---- v3: everything belongs to a project ---------------------------- */
+
+  // schema.sql already created the project table. A database that predates it
+  // has rows with nowhere to live, so they all move into one Default project —
+  // which is also what a fresh install gets, so both paths converge.
+  const projects = db.prepare(`SELECT COUNT(*) AS n FROM project`).get() as { n: number }
+  let defaultId: string | null = null
+  if (projects.n === 0) {
+    defaultId = randomUUID()
+    db.prepare(`INSERT INTO project (id, name, slug, created_at) VALUES (?, 'Default', 'default', ?)`)
+      .run(defaultId, new Date().toISOString())
+  } else {
+    const first = db.prepare(`SELECT id FROM project ORDER BY created_at LIMIT 1`).get() as { id: string }
+    defaultId = first.id
+  }
+
+  for (const table of ['job', 'asset', 'draft']) {
+    if (!columns(table).includes('project_id')) {
+      // No NOT NULL on the added column: SQLite cannot add a NOT NULL column
+      // without a default, and a constant default here would be a lie the day
+      // somebody deletes that project. The backfill immediately after is what
+      // makes it non-null in practice.
+      db.exec(`ALTER TABLE ${table} ADD COLUMN project_id TEXT REFERENCES project(id)`)
+    }
+    db.prepare(`UPDATE ${table} SET project_id = ? WHERE project_id IS NULL`).run(defaultId)
+  }
+
+  // workflow needs a rebuild rather than an ALTER: its UNIQUE moves from (name)
+  // to (project_id, name), and SQLite cannot alter a constraint in place. Ids
+  // are preserved, so every foreign key pointing at a workflow stays valid.
+  if (!columns('workflow').includes('project_id')) {
+    db.exec(`PRAGMA foreign_keys = OFF`)
+    db.exec(`
+      BEGIN;
+      CREATE TABLE workflow_v3 (
+        id          TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL REFERENCES project(id),
+        name        TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT 'draft',
+        origins     TEXT NOT NULL DEFAULT '[]',
+        profile_id  TEXT REFERENCES profile(id),
+        inputs      TEXT NOT NULL DEFAULT '[]',
+        steps       TEXT NOT NULL DEFAULT '[]',
+        produces    TEXT NOT NULL DEFAULT 'none',
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        UNIQUE (project_id, name)
+      );
+      INSERT INTO workflow_v3
+        SELECT id, '${defaultId}', name, description, status, origins, profile_id,
+               inputs, steps, produces, created_at, updated_at
+          FROM workflow;
+      DROP TABLE workflow;
+      ALTER TABLE workflow_v3 RENAME TO workflow;
+      COMMIT;
+    `)
+    db.exec(`PRAGMA foreign_keys = ON`)
+    db.exec(`CREATE INDEX IF NOT EXISTS workflow_project_idx ON workflow(project_id)`)
+  }
+
+  // Indexes last, once every column they name is guaranteed to exist.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS workflow_project_idx ON workflow(project_id);
+    CREATE INDEX IF NOT EXISTS job_project_idx ON job(project_id);
+    CREATE INDEX IF NOT EXISTS asset_project_idx ON asset(project_id);
+    CREATE INDEX IF NOT EXISTS draft_project_idx ON draft(project_id);
+  `)
+
+  // Whatever happens, there is an active project. A daemon with none would have
+  // no answer to "where does this go", which is not a state worth supporting.
+  const active = db.prepare(`SELECT value FROM meta WHERE key = 'active_project'`).get() as
+    | { value: string }
+    | undefined
+  const stillExists =
+    active && db.prepare(`SELECT 1 FROM project WHERE id = ?`).get(active.value)
+  if (!stillExists) {
+    db.prepare(
+      `INSERT INTO meta (key, value) VALUES ('active_project', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(defaultId)
   }
 }
 

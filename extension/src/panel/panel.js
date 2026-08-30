@@ -33,6 +33,7 @@ const els = {
   captureUndo: $('capture-undo'),
   captureDiscard: $('capture-discard'),
   firstRun: $('first-run'),
+  projectLine: $('project-line'),
 }
 
 /** Bumped with the manifest. Shown in the panel so "am I running the new code?"
@@ -463,6 +464,19 @@ async function refresh() {
   try {
     const o = await daemon('/api/overview')
     render({ jobs: o.jobs, workflows: o.workflows }, true, o.browsers)
+    // Which project a recording will land in. The panel cannot switch it —
+    // that is the dashboard's job — but staying silent about it means a
+    // recording can be filed where nobody is looking with nothing on screen
+    // having said so.
+    if (o.activeProject) {
+      els.projectLine.hidden = false
+      els.projectLine.innerHTML =
+        '<i></i><span>Recording into <b></b></span>'
+      els.projectLine.querySelector('b').textContent = o.activeProject.name
+    } else {
+      els.projectLine.hidden = true
+    }
+
     // The port is discovered, so the link cannot be a static href.
     els.dashboardLink.href = `http://127.0.0.1:${daemonPort}/`
     els.stamp.textContent =

@@ -249,3 +249,14 @@ button.tiny { font-size: 10px; padding: 3px 7px; margin-left: auto; flex: none; 
 .guide em { opacity: 0.85; }
 
 button:disabled { opacity: 0.4; cursor: default; }
+
+/* Which project the panel is filing into. Quiet, but never absent. */
+.project-line{
+  display:flex;align-items:center;gap:7px;
+  padding:7px 9px;margin:0 0 10px;border-radius:7px;
+  background:rgb(255 255 255 / 4%);font-size:11.5px;
+}
+.project-line b{font-weight:600;color:#e8eaf0}
+.project-line i{
+  width:6px;height:6px;border-radius:2px;background:#fe402e;flex:none;font-style:normal;
+}

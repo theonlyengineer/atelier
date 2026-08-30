@@ -18,6 +18,166 @@ const j = <T>(s: unknown, fallback: T): T => {
   }
 }
 
+/* ---------------------------------------------------------------- projects */
+
+export interface Project {
+  id: string
+  name: string
+  slug: string
+  note: string | null
+  createdAt: string
+}
+
+const rowToProject = (r: Record<string, unknown>): Project => ({
+  id: String(r.id),
+  name: String(r.name),
+  slug: String(r.slug),
+  note: r.note ? String(r.note) : null,
+  createdAt: String(r.created_at),
+})
+
+const slugify = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+
+export function listProjects(): Project[] {
+  return (open().prepare(`SELECT * FROM project ORDER BY created_at`).all() as Array<
+    Record<string, unknown>
+  >).map(rowToProject)
+}
+
+export function getProject(id: string): Project | null {
+  const r = open().prepare(`SELECT * FROM project WHERE id = ?`).get(id) as
+    | Record<string, unknown>
+    | undefined
+  return r ? rowToProject(r) : null
+}
+
+export function getProjectBySlug(slug: string): Project | null {
+  const r = open().prepare(`SELECT * FROM project WHERE slug = ?`).get(slug) as
+    | Record<string, unknown>
+    | undefined
+  return r ? rowToProject(r) : null
+}
+
+/**
+ * The project everything defaults into.
+ *
+ * Never null: the migration guarantees one exists and that `active_project`
+ * points at it, because a daemon with no active project has no answer to "where
+ * does this go" — and silently inventing one at write time is how work gets
+ * misfiled.
+ */
+/**
+ * A scope for the duration of one synchronous call.
+ *
+ * The daemon has one active project, but a single request may ask about another
+ * — an agent session bound to a different project, say. Rather than thread a
+ * projectId through forty call sites, a request sets the scope around its
+ * handler and clears it afterwards. Safe because every handler is synchronous:
+ * there is no await between the set and the clear for another request to slip
+ * into. If a handler ever becomes async, this needs AsyncLocalStorage instead.
+ */
+let scopeOverride: string | null = null
+
+export function withProject<T>(projectId: string | null | undefined, fn: () => T): T {
+  const previous = scopeOverride
+  scopeOverride = projectId && getProject(projectId) ? projectId : null
+  try {
+    return fn()
+  } finally {
+    scopeOverride = previous
+  }
+}
+
+export function activeProject(): Project {
+  if (scopeOverride) {
+    const scoped = getProject(scopeOverride)
+    if (scoped) return scoped
+  }
+  const row = open().prepare(`SELECT value FROM meta WHERE key = 'active_project'`).get() as
+    | { value: string }
+    | undefined
+  const found = row ? getProject(row.value) : null
+  if (found) return found
+  const first = listProjects()[0]
+  if (!first) throw new Error('no projects exist — the database was not migrated')
+  setActiveProject(first.id)
+  return first
+}
+
+export function setActiveProject(id: string): Project {
+  const project = getProject(id)
+  if (!project) throw new Error(`no project ${id}`)
+  open()
+    .prepare(
+      `INSERT INTO meta (key, value) VALUES ('active_project', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    )
+    .run(id)
+  return project
+}
+
+export function createProject(name: string, note?: string): Project {
+  const trimmed = (name ?? '').trim()
+  if (!trimmed) throw new Error('a project needs a name')
+  const slug = slugify(trimmed)
+  if (!slug) throw new Error('a project needs a name with at least one letter or digit')
+  if (getProjectBySlug(slug)) throw new Error(`a project called "${slug}" already exists`)
+
+  const id = randomUUID()
+  open()
+    .prepare(`INSERT INTO project (id, name, slug, note, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .run(id, trimmed, slug, nz(note), nowIso())
+  return getProject(id)!
+}
+
+export function renameProject(id: string, name: string): Project {
+  const trimmed = (name ?? '').trim()
+  if (!trimmed) throw new Error('a project needs a name')
+  const project = getProject(id)
+  if (!project) throw new Error(`no project ${id}`)
+  const slug = slugify(trimmed)
+  const clash = getProjectBySlug(slug)
+  if (clash && clash.id !== id) throw new Error(`a project called "${slug}" already exists`)
+  // The id does not change, so nothing inside the project has to move.
+  open().prepare(`UPDATE project SET name = ?, slug = ? WHERE id = ?`).run(trimmed, slug, id)
+  return getProject(id)!
+}
+
+/** What a project holds, for the "are you sure" that precedes deleting it. */
+export function projectContents(id: string): { workflows: number; jobs: number; assets: number; drafts: number } {
+  const db = open()
+  const count = (table: string) =>
+    Number((db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE project_id = ?`).get(id) as { n: number }).n)
+  return {
+    workflows: count('workflow'),
+    jobs: count('job'),
+    assets: count('asset'),
+    drafts: count('draft'),
+  }
+}
+
+export function deleteProject(id: string): boolean {
+  const project = getProject(id)
+  if (!project) return false
+  if (listProjects().length <= 1) throw new Error('this is the only project — there has to be somewhere to be')
+  if (activeProject().id === id) throw new Error('this is the active project — switch to another one first')
+
+  const held = projectContents(id)
+  const total = held.workflows + held.jobs + held.assets + held.drafts
+  if (total > 0) {
+    throw new Error(
+      `"${project.name}" is not empty — it holds ${held.workflows} workflows, ${held.jobs} runs, ` +
+        `${held.assets} assets and ${held.drafts} recordings. Move or delete those first.`,
+    )
+  }
+  return open().prepare(`DELETE FROM project WHERE id = ?`).run(id).changes > 0
+}
+
 /* ---------------------------------------------------------------- profiles */
 
 export function upsertProfile(id: string, label: string, profileDir?: string): void {
@@ -43,6 +203,7 @@ export function getProfile(id: string) {
 function rowToWorkflow(r: Record<string, unknown>): Workflow {
   return {
     id: String(r.id),
+    projectId: String(r.project_id),
     name: String(r.name),
     description: String(r.description ?? ''),
     status: String(r.status) as WorkflowStatus,
@@ -56,16 +217,24 @@ function rowToWorkflow(r: Record<string, unknown>): Workflow {
   }
 }
 
-export function listWorkflows(status?: WorkflowStatus): Workflow[] {
+/** Every read is scoped to one project. The default is the active one, so a
+ *  caller that does not care cannot accidentally see across all of them. */
+export function listWorkflows(status?: WorkflowStatus, projectId = activeProject().id): Workflow[] {
   const db = open()
   const rows = status
-    ? db.prepare(`SELECT * FROM workflow WHERE status = ? ORDER BY name`).all(status)
-    : db.prepare(`SELECT * FROM workflow ORDER BY name`).all()
+    ? db
+        .prepare(`SELECT * FROM workflow WHERE project_id = ? AND status = ? ORDER BY name`)
+        .all(projectId, status)
+    : db.prepare(`SELECT * FROM workflow WHERE project_id = ? ORDER BY name`).all(projectId)
   return (rows as Record<string, unknown>[]).map(rowToWorkflow)
 }
 
-export function getWorkflowByName(name: string): Workflow | null {
-  const r = open().prepare(`SELECT * FROM workflow WHERE name = ?`).get(name)
+/** Names are unique per project, so a lookup by name is a lookup *within* one.
+ *  A workflow in another project is not found, rather than found by surprise. */
+export function getWorkflowByName(name: string, projectId = activeProject().id): Workflow | null {
+  const r = open()
+    .prepare(`SELECT * FROM workflow WHERE project_id = ? AND name = ?`)
+    .get(projectId, name)
   return r ? rowToWorkflow(r as Record<string, unknown>) : null
 }
 
@@ -100,14 +269,18 @@ export function saveWorkflow(
   const at = nowIso()
   const id = w.id ?? randomUUID()
   db.prepare(
-    `INSERT INTO workflow (id, name, description, status, origins, profile_id, inputs, steps, produces, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO workflow (id, project_id, name, description, status, origins, profile_id, inputs, steps, produces, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name, description = excluded.description, status = excluded.status,
        origins = excluded.origins, profile_id = excluded.profile_id, inputs = excluded.inputs,
        steps = excluded.steps, produces = excluded.produces, updated_at = excluded.updated_at`,
   ).run(
     id,
+    // The project a workflow is saved into is decided once, when it is made.
+    // An update keeps whatever it already had rather than dragging it to
+    // wherever the caller happens to be standing.
+    (w.projectId || undefined) ?? getWorkflow(id)?.projectId ?? activeProject().id,
     w.name,
     w.description ?? '',
     w.status ?? 'draft',
@@ -127,6 +300,7 @@ export function saveWorkflow(
 function rowToJob(r: Record<string, unknown>, assetIds: string[] = []): Job {
   return {
     id: String(r.id),
+    projectId: String(r.project_id),
     workflowId: String(r.workflow_id),
     workflowName: String(r.workflow_name ?? ''),
     inputs: j<Record<string, string>>(r.inputs, {}),
@@ -146,13 +320,17 @@ const JOB_SELECT = `
   FROM job JOIN workflow ON workflow.id = job.workflow_id`
 
 export function createJob(workflowId: string, inputs: Record<string, string>, stepCount: number): Job {
+  // A run belongs to its workflow's project, not to whatever is active now: a
+  // job in flight must not change project because somebody switched the
+  // dashboard while it was running.
+  const owningProject = getWorkflow(workflowId)?.projectId ?? activeProject().id
   const db = open()
   const id = randomUUID()
   const at = nowIso()
   db.prepare(
-    `INSERT INTO job (id, workflow_id, inputs, status, step_index, step_count, created_at, updated_at)
-     VALUES (?, ?, ?, 'queued', 0, ?, ?, ?)`,
-  ).run(id, workflowId, JSON.stringify(inputs), stepCount, at, at)
+    `INSERT INTO job (id, project_id, workflow_id, inputs, status, step_index, step_count, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
+  ).run(id, owningProject, workflowId, JSON.stringify(inputs), stepCount, at, at)
   return getJob(id)!
 }
 
@@ -162,16 +340,18 @@ export function getJob(id: string): Job | null {
   return rowToJob(r as Record<string, unknown>, assetIdsForJob(id))
 }
 
-export function listJobs(statuses?: JobStatus[], limit = 50): Job[] {
+export function listJobs(statuses?: JobStatus[], limit = 50, projectId = activeProject().id): Job[] {
   const db = open()
   const rows = statuses?.length
     ? db
         .prepare(
-          `${JOB_SELECT} WHERE job.status IN (${statuses.map(() => '?').join(',')})
+          `${JOB_SELECT} WHERE job.project_id = ? AND job.status IN (${statuses.map(() => '?').join(',')})
            ORDER BY job.created_at DESC LIMIT ?`,
         )
-        .all(...statuses, limit)
-    : db.prepare(`${JOB_SELECT} ORDER BY job.created_at DESC LIMIT ?`).all(limit)
+        .all(projectId, ...statuses, limit)
+    : db
+        .prepare(`${JOB_SELECT} WHERE job.project_id = ? ORDER BY job.created_at DESC LIMIT ?`)
+        .all(projectId, limit)
   return (rows as Record<string, unknown>[]).map((r) => rowToJob(r, assetIdsForJob(String(r.id))))
 }
 
@@ -235,11 +415,14 @@ export function createAsset(a: Omit<Asset, 'id' | 'createdAt'>): Asset {
   const id = randomUUID()
   open()
     .prepare(
-      `INSERT INTO asset (id, sha256, mime, bytes, width, height, job_id, workflow_name, prompt, description, tags, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO asset (id, project_id, sha256, mime, bytes, width, height, job_id, workflow_name, prompt, description, tags, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
+      // An asset produced by a run belongs where the run does; one stored
+      // directly belongs wherever we are standing.
+      (a.jobId ? getJob(a.jobId)?.projectId : null) ?? activeProject().id,
       a.sha256,
       a.mime,
       a.bytes,
@@ -260,15 +443,17 @@ export function getAsset(id: string): Asset | null {
   return r ? rowToAsset(r as Record<string, unknown>) : null
 }
 
-export function listAssets(limit = 50, tag?: string): Asset[] {
+export function listAssets(limit = 50, tag?: string, projectId = activeProject().id): Asset[] {
   const db = open()
   const rows = tag
     ? db
         .prepare(
-          `SELECT * FROM asset WHERE tags LIKE ? ORDER BY created_at DESC LIMIT ?`,
+          `SELECT * FROM asset WHERE project_id = ? AND tags LIKE ? ORDER BY created_at DESC LIMIT ?`,
         )
-        .all(`%"${tag}"%`, limit)
-    : db.prepare(`SELECT * FROM asset ORDER BY created_at DESC LIMIT ?`).all(limit)
+        .all(projectId, `%"${tag}"%`, limit)
+    : db
+        .prepare(`SELECT * FROM asset WHERE project_id = ? ORDER BY created_at DESC LIMIT ?`)
+        .all(projectId, limit)
   return (rows as Record<string, unknown>[]).map(rowToAsset)
 }
 
@@ -283,18 +468,23 @@ export function createDraft(d: {
   const id = randomUUID()
   open()
     .prepare(
-      `INSERT INTO draft (id, name, profile_id, origins, raw, reviewed, created_at)
-       VALUES (?, ?, ?, ?, ?, 0, ?)`,
+      `INSERT INTO draft (id, project_id, name, profile_id, origins, raw, reviewed, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
     )
-    .run(id, d.name, nz(d.profileId), JSON.stringify(d.origins ?? []), JSON.stringify(d.raw), nowIso())
+    .run(id, activeProject().id, d.name, nz(d.profileId), JSON.stringify(d.origins ?? []), JSON.stringify(d.raw), nowIso())
   return id
 }
 
-export function listDrafts(unreviewedOnly = true) {
+export function listDrafts(unreviewedOnly = true, projectId = activeProject().id) {
   const sql = unreviewedOnly
-    ? `SELECT id, name, origins, created_at FROM draft WHERE reviewed = 0 ORDER BY created_at DESC`
-    : `SELECT id, name, origins, created_at FROM draft ORDER BY created_at DESC`
-  return open().prepare(sql).all() as { id: string; name: string; origins: string; created_at: string }[]
+    ? `SELECT id, name, origins, created_at FROM draft WHERE project_id = ? AND reviewed = 0 ORDER BY created_at DESC`
+    : `SELECT id, name, origins, created_at FROM draft WHERE project_id = ? ORDER BY created_at DESC`
+  return open().prepare(sql).all(projectId) as {
+    id: string
+    name: string
+    origins: string
+    created_at: string
+  }[]
 }
 
 export function getDraft(id: string) {
@@ -406,15 +596,16 @@ export interface RunHistory {
  * and called it a summary. What a person wants from a history is the shape of
  * it: how many, how many worked, when it last ran.
  */
-export function runHistory(limitPerWorkflow = 20): Map<string, RunHistory> {
+export function runHistory(limitPerWorkflow = 20, projectId = activeProject().id): Map<string, RunHistory> {
   const rows = open()
     .prepare(
       `SELECT workflow_id, status, updated_at
          FROM job
+        WHERE project_id = ?
         ORDER BY created_at DESC
         LIMIT 500`,
     )
-    .all() as Array<Record<string, unknown>>
+    .all(projectId) as Array<Record<string, unknown>>
 
   const out = new Map<string, RunHistory>()
   for (const r of rows) {
@@ -448,16 +639,17 @@ export function setAssetDescription(id: string, description: string | null): Ass
  * nothing ran, because a gap is information and a chart that silently omits it
  * lies about the shape of the week.
  */
-export function runsByDay(days = 14): Array<{ day: string; ok: number; failed: number }> {
+export function runsByDay(days = 14, projectId = activeProject().id): Array<{ day: string; ok: number; failed: number }> {
   const rows = open()
     .prepare(
       `SELECT substr(created_at, 1, 10) AS day,
               SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS ok,
               SUM(CASE WHEN status IN ('failed','cancelled') THEN 1 ELSE 0 END) AS failed
          FROM job
+        WHERE project_id = ?
         GROUP BY day`,
     )
-    .all() as Array<Record<string, unknown>>
+    .all(projectId) as Array<Record<string, unknown>>
 
   const found = new Map(rows.map((r) => [String(r.day), { ok: Number(r.ok), failed: Number(r.failed) }]))
   const out: Array<{ day: string; ok: number; failed: number }> = []
