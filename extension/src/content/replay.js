@@ -113,10 +113,11 @@
   function setValue(el, value) {
     el.focus()
 
-    // contenteditable: ChatGPT, Notion, Slack and most modern editors. Assigning
-    // textContent does not reach an editor like ProseMirror, which tracks its own
-    // document model; execCommand('insertText') produces the same event sequence
-    // as real typing, which every editor is by definition built to handle.
+    // contenteditable, which is how most rich-text editors are built. Assigning
+    // textContent does not reach an editor that maintains its own document model
+    // and reconciles the DOM against it; execCommand('insertText') produces the
+    // same event sequence as real typing, which such an editor is by definition
+    // built to handle.
     if (el.isContentEditable) {
       const range = document.createRange()
       range.selectNodeContents(el)

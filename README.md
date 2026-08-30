@@ -100,9 +100,10 @@ define_workflow / delete_workflow                        → hand-write or remov
 Check `atelier_status` before `run_workflow`: a workflow with no browser attached parks
 and waits for a human, which is slower than saying so up front.
 
-For images on theonlyengineer.com, the prompt is the style guide from
-`gtm/wiki/image-style-guide.md` plus a one-line subject. Claude composes it; the
-workflow just types whatever it is given.
+A workflow types whatever string it is handed and applies no house style of its own.
+Anything long-form — a prompt, a message body, a search query — is composed by the
+caller and passed whole, so where that text comes from stays a property of your project
+rather than of Atelier.
 
 ## When something goes wrong
 

@@ -93,7 +93,7 @@ server.registerTool(
         .record(z.string())
         .optional()
         .describe(
-          'Values for the workflow\'s inputs. For image generation, compose the full prompt yourself — prepend the style guide from wiki/image-style-guide.md to the subject description.',
+          'Values for the workflow\'s inputs, matching the input names from list_workflows. Long-form values are composed by you and passed whole — the workflow types whatever string it is given and applies no formatting, templating or house style of its own.',
         ),
       wait_seconds: z
         .number()

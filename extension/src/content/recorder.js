@@ -123,10 +123,10 @@
   /**
    * Anything a human types into.
    *
-   * contenteditable matters more than it looks: ChatGPT, Notion, Slack, and most
-   * modern editors use a contenteditable div rather than a textarea. Ignoring it
-   * meant recording a session on ChatGPT and capturing every click but not the
-   * prompt — a workflow with the one indispensable step missing.
+   * contenteditable matters more than it looks: most rich-text editors use a
+   * contenteditable div rather than a textarea. Ignoring it meant recording a
+   * session on such an editor and capturing every click but not the text — a
+   * workflow with its one indispensable step missing.
    */
   const isEditable = (el) =>
     el instanceof HTMLInputElement ||
