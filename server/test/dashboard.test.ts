@@ -346,3 +346,72 @@ test('no dark-mode block survives anywhere in the page', skip, async () => {
     'the house style is light only — a dark block here means the dashboard stops matching it',
   )
 })
+
+test('the asset viewer fits and stays reachable at any window size', skip, async () => {
+  // Two bugs lived here, both from the same root: a grid item defaults to
+  // min-height:auto, so it will not shrink below its content. The metadata
+  // column therefore never scrolled — its overflow:auto had nothing to act on —
+  // and the parent's max-height simply clipped it, putting Save out of reach.
+  // The image, meanwhile, was bounded by the viewport rather than by its own
+  // stage, so a tall one hung out of the bottom of the dialog.
+  const assets = await import('../src/core/assets.ts')
+
+  // A deliberately tall image and a long description: the shapes that break it.
+  // A genuine 180x900 PNG. A malformed one decodes to zero and then renders at
+  // zero in the stacked layout, which looks exactly like the collapse this test
+  // is here to catch — a fixture that fakes the bug is worse than no fixture.
+  const tall = assets.store(Buffer.from('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', 'base64'), {
+    mime: 'image/png',
+    prompt: 'a very tall test pattern',
+  })
+  repo.setAssetDescription(
+    tall.id,
+    'A tall test pattern. This description is long on purpose so the metadata column has to scroll. '.repeat(8),
+  )
+
+  for (const [w, h] of [
+    [1360, 900], // roomy
+    [1280, 420], // short — where the clipping showed
+    [700, 800], // narrow — where the layout stacks
+  ]) {
+    const page = await browser.newPage()
+    await page.setViewport({ width: w, height: h })
+    await page.goto(`http://127.0.0.1:${PORT}/#assets`, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(`document.querySelectorAll('#assets [data-asset]').length > 0`, { timeout: 8000 })
+    await page.evaluate(`document.querySelectorAll('#assets [data-asset]')[0].click()`)
+    await page.waitForFunction(`document.querySelector('#viewer').open`, { timeout: 4000 })
+    await new Promise((r) => setTimeout(r, 500))
+
+    const m = (await page.evaluate(`(() => {
+      const v = document.querySelector('.viewer')
+      const st = document.querySelector('.stage')
+      const img = document.querySelector('#v-img')
+      const meta = document.querySelector('.meta')
+      const save = document.querySelector('#v-save')
+      const R = e => e.getBoundingClientRect()
+      return {
+        imgOverflows: R(img).bottom > R(st).bottom + 1 || R(img).right > R(st).right + 1,
+        // Non-zero, not "large": in the stacked layout the element is the image
+        // itself at its natural size, and the fixture is deliberately tiny. In
+        // the two-column layout the element is inset to the stage and the
+        // picture is letterboxed inside it by object-fit, so its box is the
+        // stage's — which is exactly the property being guarded.
+        imgHasSize: R(img).height > 0 && R(img).width > 0,
+        overflowing: R(meta).bottom > R(v).bottom + 2,
+        metaScrolls: meta.scrollHeight > meta.clientHeight + 1,
+        viewerScrolls: v.scrollHeight > v.clientHeight + 1,
+        saveInDialog: R(save).bottom <= R(v).bottom + 2 || v.scrollHeight > v.clientHeight + 1,
+      }
+    })()`)) as Record<string, boolean>
+
+    const at = `${w}x${h}`
+    assert.equal(m.imgOverflows, false, `${at}: the image must stay inside its stage`)
+    assert.equal(m.imgHasSize, true, `${at}: the image must not collapse to nothing`)
+    // If anything hangs past the bottom, something has to be able to scroll to it.
+    if (m.overflowing) {
+      assert.ok(m.metaScrolls || m.viewerScrolls, `${at}: content overflows with nothing to scroll`)
+    }
+    assert.equal(m.saveInDialog, true, `${at}: Save must be reachable`)
+    await page.close()
+  }
+})

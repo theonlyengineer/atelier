@@ -263,14 +263,40 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .strip button:hover img{border-color:var(--faint)}
 
   /* --------------------------------------------------------- viewer --- */
-  dialog{border:0;padding:0;background:transparent;max-width:min(1080px,94vw);width:100%}
+  dialog{border:0;padding:0;background:transparent;max-width:min(1080px,94vw);width:100%;
+    max-height:92vh}
   dialog::backdrop{background:rgb(8 10 14/72%);backdrop-filter:blur(3px)}
+  /*
+   * minmax(0, …) and min-height:0 are both load-bearing, for the same reason.
+   * A grid item defaults to min-height:auto, so it refuses to shrink below its
+   * content — which means overflow:auto on the metadata column never engages
+   * and the parent's max-height just clips it. On a short window that put the
+   * bottom of the image below the bottom of the dialog and made the Save button
+   * unreachable, with nothing to scroll.
+   */
   .viewer{background:var(--panel);border-radius:var(--r);overflow:hidden;display:grid;
-    grid-template-columns:1.5fr 1fr;max-height:88vh}
-  @media (max-width:760px){ .viewer{grid-template-columns:1fr;max-height:92vh;overflow:auto} }
-  .viewer .stage{background:var(--sunk);display:grid;place-items:center;padding:18px;min-height:280px}
-  .viewer .stage img{max-width:100%;max-height:74vh;object-fit:contain;border-radius:8px}
-  .viewer .meta{padding:20px;display:flex;flex-direction:column;gap:14px;overflow:auto}
+    grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);grid-template-rows:minmax(0,1fr);
+    max-height:88vh;min-height:min(360px,70vh)}
+  .viewer .stage{background:var(--sunk);position:relative;padding:18px;min-height:0;
+    overflow:hidden}
+  /*
+   * Absolutely positioned and letterboxed, rather than max-height:100%. A
+   * percentage max-height resolves against the grid area, which is itself
+   * auto-sized from the content — circular, so the browser drops it and a tall
+   * image renders at full height inside a short box. object-fit:contain on a
+   * definitely-sized element has no such circularity.
+   */
+  .viewer .stage img{position:absolute;inset:18px;width:calc(100% - 36px);
+    height:calc(100% - 36px);object-fit:contain;border-radius:8px}
+  .viewer .meta{padding:20px;display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
+  /* Stacked, the whole panel scrolls as one rather than two nested scrollers. */
+  @media (max-width:760px){
+    .viewer{grid-template-columns:1fr;grid-template-rows:auto auto;max-height:92vh;overflow:auto}
+    .viewer .stage{min-height:180px;display:grid;place-items:center}
+    .viewer .stage img{position:static;inset:auto;width:auto;height:auto;
+      max-width:100%;max-height:46vh}
+    .viewer .meta{overflow:visible}
+  }
   .viewer h3{margin:0;font-size:15px}
   .field label{display:block;font-size:10.5px;font-weight:700;letter-spacing:.11em;
     text-transform:uppercase;color:var(--faint);margin-bottom:6px}
@@ -280,11 +306,22 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .field textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
   .field p{margin:0;font-size:12.5px;color:var(--dim);line-height:1.6;white-space:pre-wrap;
     word-break:break-word}
+  /*
+   * A prompt can be four hundred words of style guide. Left to run, it makes the
+   * metadata column the tallest thing in the dialog, the stage grows to match,
+   * and a wide image ends up marooned in the middle of a very tall box — which
+   * is what "the image is at the bottom" actually was. It gets its own scroller
+   * so the panel stays a sensible height and the whole text is still there.
+   */
+  #v-prompt{max-height:8.5rem;overflow:auto;padding-right:6px}
+  #v-prompt::-webkit-scrollbar{width:5px}
+  #v-prompt::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
   .field p.none{color:var(--faint);font-style:italic}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:12px;font-family:var(--mono);
     color:var(--dim)}
   .kv b{color:var(--faint);font-weight:500}
-  .viewer .foot{display:flex;gap:8px;align-items:center;margin-top:auto;padding-top:6px}
+  .viewer .foot{display:flex;gap:8px;align-items:center;margin-top:auto;padding:12px 0 0;
+    position:sticky;bottom:-20px;background:var(--panel);flex-wrap:wrap}
   .saved{font-size:12px;color:var(--ok);opacity:0;transition:opacity .2s}
   .saved.on{opacity:1}
 
