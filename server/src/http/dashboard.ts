@@ -78,27 +78,14 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     --sans:"Poppins",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
-  /* The house style is light only. This keeps the identity rather than
-     inverting it: the paper goes warm near-black, the ink becomes the paper
-     colour, and the vermilion is untouched — it is the one thing that has to
-     read identically in both. */
-  @media (prefers-color-scheme:dark){
-    :root{
-      --page:#0F0E0C; --panel:#171613; --sunk:#1E1C19;
-      --ink:#FFFBF5;
-      --dim:rgb(255 251 245/72%);
-      --faint:rgb(255 251 245/46%);
-      --line:rgb(255 251 245/15%);
-      --line-2:rgb(255 251 245/8%);
-      --accent:#FF5842; --accent-soft:#2E1512;
-      --ok:#FFFBF5; --ok-soft:#221F1B;
-      --warn:#D69A3F; --warn-soft:#2A2113;
-      --bad:#FF5842; --bad-soft:#2E1512;
-      --k1:#1E1C19; --k1-ink:#FFFBF5;
-      --k2:#2E1512; --k2-ink:#FF8272;
-      --k3:#FFFBF5; --k3-ink:#111111;
-    }
-  }
+  /*
+   * Light only, on purpose. The house style has no dark mode, and inventing one
+   * means the dashboard stops matching the thing it is meant to match for
+   * everyone whose OS is set to dark — which is most people, which is how this
+   * shipped looking nothing like its own reference. If a dark variant is ever
+   * wanted it is a decision to take deliberately, not a default to assume.
+   */
+  :root{color-scheme:light}
   *{box-sizing:border-box}
   [hidden]{display:none!important}
   html,body{height:100%}
@@ -186,19 +173,11 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .kpi .chip{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;
     background:rgb(0 0 0/8%);font-family:var(--sans)}
   .kpi.k3 .chip{background:rgb(255 255 255/14%)}
-  @media (prefers-color-scheme:dark){
-    .kpi .chip{background:rgb(255 255 255/10%)}
-    .kpi.k3 .chip{background:rgb(0 0 0/10%)}
-  }
   .kpi .sub{font-size:12px;opacity:.78;margin-top:2px}
   .kpi .go{all:unset;cursor:pointer;margin-top:14px;align-self:flex-start;font-size:12px;
     font-weight:600;background:rgb(255 255 255/80%);padding:7px 14px;border-radius:99px;
     display:flex;align-items:center;gap:6px;color:inherit}
   .kpi.k3 .go{background:rgb(255 255 255/13%)}
-  @media (prefers-color-scheme:dark){
-    .kpi .go{background:rgb(255 255 255/11%)}
-    .kpi.k3 .go{background:rgb(0 0 0/12%)}
-  }
   .kpi .go:hover{filter:brightness(1.05)}
 
   /* ---------------------------------------------------------- charts --- */

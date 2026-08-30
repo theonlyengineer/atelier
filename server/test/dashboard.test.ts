@@ -316,3 +316,33 @@ test('a workflow name is readable in the overview, not squeezed to one letter', 
   }
   await page.close()
 })
+
+test('the dashboard is light even when the operating system is dark', skip, async () => {
+  // A dark variant was invented that the house style does not have, so anyone
+  // with a dark OS — most people — got a dashboard that looked nothing like the
+  // thing it is supposed to match. Light is the whole theme; this is the test
+  // that stops it drifting back.
+  const page = await browser.newPage()
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }])
+  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(`document.querySelectorAll('.kpi').length > 0`, { timeout: 8000 })
+
+  const bg = await page.evaluate(`getComputedStyle(document.body).backgroundColor`)
+  assert.equal(bg, 'rgb(255, 251, 245)', 'the paper colour, regardless of the OS setting')
+
+  const ink = await page.evaluate(`getComputedStyle(document.body).color`)
+  assert.equal(ink, 'rgb(0, 0, 0)', 'ink stays ink')
+  await page.close()
+})
+
+test('no dark-mode block survives anywhere in the page', skip, async () => {
+  // Belt and braces: a component-level override would reintroduce the same bug
+  // one card at a time, and the computed-style check above would not catch it.
+  const res = await fetch(`http://127.0.0.1:${PORT}/`)
+  const html = await res.text()
+  assert.equal(
+    html.includes('prefers-color-scheme'),
+    false,
+    'the house style is light only — a dark block here means the dashboard stops matching it',
+  )
+})
