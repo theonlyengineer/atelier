@@ -40,8 +40,14 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 
   /* The status strip is the whole point of the page: four numbers that say
      whether anything is wrong, readable from across the room. */
-  .strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:28px}
-  .stat{padding:13px 15px;border:1px solid var(--line);border-radius:11px;background:var(--card)}
+  /* Six stats, so auto-fit at minmax(150px) wraps 5+1 on a laptop and leaves one
+     card stranded on its own row. Three across, then six, is a rhythm that
+     divides cleanly at both widths. */
+  .strip{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:6px}
+  @media (min-width:720px){ .strip{grid-template-columns:repeat(6,1fr)} }
+  .stat{all:unset;display:block;padding:13px 15px;border:1px solid var(--line);border-radius:11px;
+    background:var(--card)}
+  .stat:hover{border-color:var(--muted)}
   .stat b{display:block;font-size:23px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.15}
   .stat span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:600}
   .stat.alert{border-color:var(--alert);background:var(--alert-bg)}
@@ -75,6 +81,27 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .go-btn:hover{filter:brightness(1.25)}
   .go-btn:disabled{opacity:.4;cursor:default}
   .steplist{margin:8px 0 0;padding-left:22px;font-size:11.5px;line-height:1.6;color:var(--muted)}
+  .steplist summary{cursor:pointer;margin-left:-22px;list-style-position:inside}
+
+  /* Tabs. Underline rather than boxes: the panel below is the content, and a
+     boxed tab draws a second container around something already contained. */
+  .tabs{display:flex;gap:2px;margin:22px 0 4px;border-bottom:1px solid var(--line);
+        flex-wrap:wrap}
+  .tabs button{all:unset;cursor:pointer;padding:9px 14px;font-size:13px;color:var(--muted);
+    border-bottom:2px solid transparent;margin-bottom:-1px;display:flex;align-items:center;gap:7px}
+  .tabs button:hover{color:var(--fg)}
+  .tabs button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--fg);font-weight:600}
+  .tabs button:focus-visible{outline:2px solid var(--go);outline-offset:-2px;border-radius:3px}
+  /* A count on the tab, so you can see there is something to deal with without
+     opening it — which is the only thing that makes hiding it acceptable. */
+  .badge{font-size:10px;font-weight:700;min-width:17px;text-align:center;padding:1px 5px;
+    border-radius:9px;background:var(--line);color:var(--muted);font-variant-numeric:tabular-nums}
+  .badge.alert{background:var(--alert-bg);color:var(--alert)}
+  .badge.go{background:var(--go-bg);color:var(--go)}
+  #attention section{margin-top:18px}
+  .alert-h{color:var(--alert)}
+  .stat{cursor:pointer}
+  .stat:focus-visible{outline:2px solid var(--go);outline-offset:2px}
 
   .empty{color:var(--muted);padding:13px 15px;border:1px dashed var(--line);border-radius:11px}
   .del{all:unset;cursor:pointer;font-size:11px;color:var(--muted);padding:3px 9px;
@@ -115,51 +142,87 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   </header>
   <p class="sub" id="uptime">&nbsp;</p>
 
+  <!-- The strip is navigation as well as a readout: each number is the reason
+       you would open the tab it belongs to. -->
   <div class="strip" id="strip"></div>
 
-  <section id="blocked-sec" hidden>
-    <h2>Needs you</h2>
-    <div id="blocked"></div>
-  </section>
+  <!--
+    Everything above and inside this band stays put on every tab.
 
-  <section id="active-sec" hidden>
-    <h2>Running</h2>
-    <div id="active"></div>
-  </section>
+    Splitting the page into tabs is only an improvement if it never hides the
+    thing you came to find. A parked job and a browser that is not attached are
+    the two states where Atelier is stuck waiting on a person, so they are the
+    two that must never be one click away.
+  -->
+  <div id="attention">
+    <section id="blocked-sec" hidden>
+      <h2 class="alert-h">Needs you</h2>
+      <div id="blocked"></div>
+    </section>
+    <section id="detached-sec" hidden>
+      <div class="card alert">
+        <div class="row"><span class="name">No browser attached</span></div>
+        <div class="why">Load the extension from <code>atelier/extension/</code> at
+          <code>chrome://extensions</code>, then open any tab. Workflows cannot run until one is.</div>
+      </div>
+    </section>
+  </div>
 
-  <section>
-    <h2>Browsers</h2>
-    <div id="browsers"></div>
-  </section>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" id="tab-activity" data-tab="activity" aria-controls="panel-activity">
+      Activity<span class="badge" id="badge-activity" hidden></span>
+    </button>
+    <button role="tab" id="tab-workflows" data-tab="workflows" aria-controls="panel-workflows">
+      Workflows<span class="badge" id="badge-workflows" hidden></span>
+    </button>
+    <button role="tab" id="tab-assets" data-tab="assets" aria-controls="panel-assets">
+      Assets<span class="badge" id="badge-assets" hidden></span>
+    </button>
+    <button role="tab" id="tab-diagnostics" data-tab="diagnostics" aria-controls="panel-diagnostics">
+      Diagnostics
+    </button>
+  </nav>
 
-  <section id="drafts-sec" hidden>
-    <div class="head">
-      <h2>Recordings awaiting review</h2>
-    </div>
-    <div id="drafts"></div>
-  </section>
+  <div role="tabpanel" id="panel-activity" aria-labelledby="tab-activity">
+    <section id="active-sec" hidden>
+      <h2>Running</h2>
+      <div id="active"></div>
+    </section>
+    <section>
+      <h2>Recent jobs</h2>
+      <div id="recent"></div>
+    </section>
+    <section>
+      <h2>Browsers</h2>
+      <div id="browsers"></div>
+    </section>
+  </div>
 
-  <section>
-    <h2>Workflows</h2>
-    <div id="workflows"></div>
-  </section>
+  <div role="tabpanel" id="panel-workflows" aria-labelledby="tab-workflows" hidden>
+    <section>
+      <h2>Workflows</h2>
+      <div id="workflows"></div>
+    </section>
+    <section id="drafts-sec" hidden>
+      <h2>Recordings</h2>
+      <div id="drafts"></div>
+    </section>
+  </div>
 
-  <section id="assets-sec">
-    <h2>Recent assets</h2>
-    <div id="assets" class="grid"></div>
-  </section>
+  <div role="tabpanel" id="panel-assets" aria-labelledby="tab-assets" hidden>
+    <section id="assets-sec">
+      <h2>Recent assets</h2>
+      <div id="assets" class="grid"></div>
+    </section>
+  </div>
 
-  <section>
-    <h2>Recent jobs</h2>
-    <div id="recent"></div>
-  </section>
-
-  <section>
-    <h2>Log</h2>
-    <pre class="log" id="log">…</pre>
-  </section>
-
-  <footer id="paths"></footer>
+  <div role="tabpanel" id="panel-diagnostics" aria-labelledby="tab-diagnostics" hidden>
+    <section>
+      <h2>Log</h2>
+      <pre class="log" id="log">…</pre>
+    </section>
+    <footer id="paths"></footer>
+  </div>
 </div>
 
 <script>
@@ -176,6 +239,72 @@ const dur = (sec) => {
   const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60)
   return d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m ? m + 'm' : Math.floor(sec) + 's'
 }
+
+/* ------------------------------------------------------------------ tabs */
+
+const TABS = ['activity', 'workflows', 'assets', 'diagnostics']
+
+/**
+ * Which tab is showing lives here, not in render().
+ *
+ * render() runs on every state frame — every change, and every 25s regardless.
+ * If the tab were derived from the data it would snap back under the reader
+ * mid-sentence, which is the classic way a live-updating page becomes unusable.
+ */
+let currentTab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'activity'
+
+function applyTab() {
+  for (const t of TABS) {
+    const tab = $('tab-' + t)
+    const panel = $('panel-' + t)
+    if (!tab || !panel) continue
+    const on = t === currentTab
+    tab.setAttribute('aria-selected', on ? 'true' : 'false')
+    tab.tabIndex = on ? 0 : -1
+    panel.hidden = !on
+  }
+}
+
+function goTab(t, { focus = false } = {}) {
+  if (!TABS.includes(t)) return
+  currentTab = t
+  // In the hash so a refresh keeps you where you were, and so a link to a
+  // particular view is a link.
+  if (location.hash.slice(1) !== t) history.replaceState(null, '', '#' + t)
+  applyTab()
+  if (focus) $('tab-' + t).focus()
+}
+
+function setBadge(tab, n, tone) {
+  const el = $('badge-' + tab)
+  if (!el) return
+  el.hidden = !n
+  el.textContent = String(n)
+  el.className = 'badge' + (tone ? ' ' + tone : '')
+}
+
+$('tabs').addEventListener('click', (e) => {
+  const t = e.target.closest('[data-tab]')
+  if (t) goTab(t.dataset.tab)
+})
+
+// Arrow keys across a tablist are the expected behaviour, and cheap.
+$('tabs').addEventListener('keydown', (e) => {
+  const i = TABS.indexOf(currentTab)
+  if (e.key === 'ArrowRight') goTab(TABS[(i + 1) % TABS.length], { focus: true })
+  else if (e.key === 'ArrowLeft') goTab(TABS[(i - 1 + TABS.length) % TABS.length], { focus: true })
+  else if (e.key === 'Home') goTab(TABS[0], { focus: true })
+  else if (e.key === 'End') goTab(TABS[TABS.length - 1], { focus: true })
+  else return
+  e.preventDefault()
+})
+
+window.addEventListener('hashchange', () => {
+  const t = location.hash.slice(1)
+  if (TABS.includes(t)) { currentTab = t; applyTab() }
+})
+
+applyTab()
 
 function jobCard(j, alert) {
   const pct = j.stepCount ? (j.stepIndex / j.stepCount) * 100 : 0
@@ -210,9 +339,14 @@ function workflowCard(w) {
   const degraded = (health.degraded || []).map(s =>
     '<div class="why bad">' + esc(s.note) + ' — ' + esc(s.detail) + '</div>').join('')
 
-  const steps = pending && w.stepList
-    ? '<ol class="steplist">' + w.stepList.map(s => '<li>' + esc(s.note) + '</li>').join('') + '</ol>'
-    : ''
+  // The steps are the review, so they are shown — but a twenty-step proposal
+  // should not push everything else off the screen to say so.
+  const list = (w.stepList || []).map(s => '<li>' + esc(s.note) + '</li>').join('')
+  const steps = !pending || !list
+    ? ''
+    : (w.stepList.length > 6
+        ? '<details class="steplist"><summary>' + w.stepList.length + ' steps</summary><ol>' + list + '</ol></details>'
+        : '<ol class="steplist">' + list + '</ol>')
 
   return '<div class="card' + (health.state === 'fragile' ? ' alert' : '') + '">' +
     '<div class="row"><span class="name mono">' + esc(w.name) + '</span>' +
@@ -235,15 +369,31 @@ function render(d) {
   const blocked = d.jobs.filter(j => j.status === 'blocked')
   const active = d.jobs.filter(j => j.status === 'running' || j.status === 'queued')
 
+  const decaying = (d.unhealthy || []).length
+  const toActivate = (d.pendingActivation || []).length
+
+  // Each stat is a link to the tab you would act on it in — which is what keeps
+  // the split navigable rather than a place things went missing.
+  const stat = (n, label, tab, tone) =>
+    '<button class="stat' + (tone ? ' ' + tone : '') + '" data-goto="' + tab + '">' +
+    '<b>' + n + '</b><span>' + label + '</span></button>'
+
   $('strip').innerHTML =
-    '<div class="stat' + (blocked.length ? ' alert' : '') + '"><b>' + blocked.length + '</b><span>Needs you</span></div>' +
-    '<div class="stat' + (active.length ? ' go' : '') + '"><b>' + active.length + '</b><span>Running</span></div>' +
-    '<div class="stat' + (d.browsers.length ? ' go' : ' alert') + '"><b>' + d.browsers.length + '</b><span>Browsers</span></div>' +
-    '<div class="stat"><b>' + d.counts.workflows + '</b><span>Workflows</span></div>' +
-    '<div class="stat' + ((d.unhealthy || []).length ? ' alert' : '') + '"><b>' +
-      (d.unhealthy || []).length + '</b><span>Decaying</span></div>' +
-    '<div class="stat' + ((d.pendingActivation || []).length ? ' go' : '') + '"><b>' +
-      (d.pendingActivation || []).length + '</b><span>To activate</span></div>'
+    stat(blocked.length, 'Needs you', 'activity', blocked.length ? 'alert' : '') +
+    stat(active.length, 'Running', 'activity', active.length ? 'go' : '') +
+    stat(d.browsers.length, 'Browsers', 'activity', d.browsers.length ? 'go' : 'alert') +
+    stat(d.counts.workflows, 'Workflows', 'workflows', '') +
+    stat(decaying, 'Decaying', 'workflows', decaying ? 'alert' : '') +
+    stat(toActivate, 'To activate', 'workflows', toActivate ? 'go' : '')
+
+  // A browser that is not attached is the other state where Atelier is stuck
+  // waiting on a person, so it sits with the parked jobs rather than three
+  // sections down under "Browsers".
+  $('detached-sec').hidden = d.browsers.length > 0
+
+  setBadge('activity', active.length, active.length ? 'go' : '')
+  setBadge('workflows', decaying + toActivate, decaying ? 'alert' : toActivate ? 'go' : '')
+  setBadge('assets', d.assets.length, '')
 
   $('blocked-sec').hidden = !blocked.length
   $('blocked').innerHTML = blocked.map(j => jobCard(j, true)).join('')
@@ -305,6 +455,9 @@ async function post(path, body) {
 
 // Delegated, because the cards are re-rendered on every state frame.
 document.addEventListener('click', async (e) => {
+  const goto = e.target.closest?.('[data-goto]')
+  if (goto) return goTab(goto.dataset.goto)
+
   const activate = e.target.dataset?.activate
   if (activate) {
     e.target.disabled = true

@@ -59,9 +59,19 @@ processes can reach the port.
 
 ## Where to look
 
-**`http://127.0.0.1:7717`** — the dashboard. Whether the daemon is up, which browsers
-are connected, what is running, what is stuck, the workflows it knows, thumbnails of
-recent assets, and the tail of the log. It updates live; there is nothing to refresh.
+**`http://127.0.0.1:7717`** — the dashboard. It updates live; there is nothing to
+refresh.
+
+Four tabs, because these are four different questions asked at different moments:
+**Activity** (what is running, what just ran, which browsers are attached),
+**Workflows** (what it can do, what is decaying, what is waiting to be activated),
+**Assets**, and **Diagnostics** (the log and where state lives).
+
+Two things are never behind a tab: **a parked job and a detached browser.** Those are
+the states where Atelier is stuck waiting on a person, and a status page that makes you
+go looking for them is worse than one long scroll. Each tab carries a count, so nothing
+has to be opened to be noticed, and the tab lives in the URL so a reload — or a link —
+puts you back where you were.
 
 The dashboard and the extension side panel are deliberately different things. The
 **side panel** is the action surface: the one or two things that need you, in the
