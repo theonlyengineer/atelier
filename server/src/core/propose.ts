@@ -27,6 +27,10 @@ export interface RecordedAction {
   element?: { tag?: string; type?: string | null; label?: string | null; selectors?: SelectorCandidate[] }
   value?: string | null
   secret?: boolean
+  /** Set in the popup while recording. `fixed` means this field is setup: keep
+   *  the recorded text and replay it exactly. Anything else — including absent,
+   *  which is the default — is a value the caller supplies. */
+  role?: 'input' | 'fixed'
   capture?: { as?: 'image' | 'text' | 'download'; attribute?: string }
   wait?: { kind?: 'visible' | 'hidden'; ms?: number }
   origin?: string
@@ -39,10 +43,6 @@ export interface DraftInput {
   origins: string[]
   raw: { actions?: RecordedAction[] } | unknown
 }
-
-/** A value has to be at least this long before we assume it is the thing you
- *  would want to vary between runs. A quantity or a two-letter code is not. */
-const PARAMETER_MIN_LENGTH = 24
 
 /** Generation is slow and a capture that gives up early is the failure this
  *  whole design exists to avoid. Ordinary steps stay snappy. */
@@ -127,7 +127,12 @@ export function proposeWorkflow(draft: DraftInput): Workflow {
   for (const action of usable) {
     const previous = collapsed[collapsed.length - 1]
     if (action.kind === 'type' && previous?.kind === 'type' && targetKey(previous) === targetKey(action)) {
-      collapsed[collapsed.length - 1] = action
+      // The last value wins, but a role does not: it was set against the field
+      // in the panel, and going back to fix a typo should not silently undo it.
+      // Spread-with-undefined is not the same as absent under
+      // exactOptionalPropertyTypes, so the key is only written when there is one.
+      const role = action.role ?? previous.role
+      collapsed[collapsed.length - 1] = role ? { ...action, role } : { ...action }
       continue
     }
     collapsed.push(action)
@@ -139,17 +144,26 @@ export function proposeWorkflow(draft: DraftInput): Workflow {
     )
   }
 
-  /* --- 4. Choose which typed value is the parameter --------------------- */
-  // The longest one. A prompt is long; a quantity, a page number and a filter
-  // are short. Only the longest is parameterised, because a workflow with four
-  // required inputs is one nobody calls.
-  const typedActions = collapsed.filter((a) => a.kind === 'type' && !a.secret && (a.value ?? '').length > 0)
-  const longest = typedActions.reduce<RecordedAction | null>(
-    (best, a) => ((a.value ?? '').length > (best?.value ?? '').length ? a : best),
-    null,
+  /* --- 4. Which typed values are supplied, and which are kept ----------- */
+  //
+  // Typing something by hand during a recording *is* the signal that it is a
+  // value somebody supplies: nobody types out a constant to demonstrate that it
+  // never changes. So every typed field becomes an input, and the only thing the
+  // person has to say is which ones are setup to be replayed exactly — said by
+  // ticking the field in the panel, which marks it `fixed`.
+  //
+  // This replaced a rule that made the longest typed value the parameter and
+  // froze everything else. It inverted the common case exactly: a long block of
+  // setup typed once became the thing the caller had to supply, while the short
+  // thing that actually varies was baked in. No heuristic can tell those apart —
+  // and once the default is right, none is needed.
+  const parameterised = new Set(
+    collapsed
+      .filter(
+        (a) => a.kind === 'type' && !a.secret && (a.value ?? '').length > 0 && a.role !== 'fixed',
+      )
+      .map(targetKey),
   )
-  const parameterised =
-    longest && (longest.value ?? '').length >= PARAMETER_MIN_LENGTH ? targetKey(longest) : null
 
   const inputs: WorkflowInput[] = []
   const takenNames = new Set<string>()
@@ -207,7 +221,7 @@ export function proposeWorkflow(draft: DraftInput): Workflow {
     }
 
     if (action.kind === 'type') {
-      const isParameter = parameterised !== null && targetKey(action) === parameterised
+      const isParameter = parameterised.has(targetKey(action))
       let value = action.value ?? ''
       if (isParameter) {
         const name = inputName(label, takenNames)

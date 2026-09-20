@@ -93,20 +93,20 @@ test('every candidate is kept, because the fallback list is what survives a rede
   assert.equal(wf.steps[0]!.selectors.length, 3)
 })
 
-test('the longest typed value becomes a {{placeholder}} and a declared input', () => {
+test('a typed value becomes a {{placeholder}} and a declared input', () => {
+  // Typing something by hand during a recording is the signal that it is a
+  // value somebody supplies. Nothing is guessed from how long it is.
   const wf = proposeWorkflow({
     name: 'params',
     origins: ['https://x.test'],
     raw: {
       actions: [
-        typed('Search', 'x'),
-        typed('Prompt', 'a long piece of text that is obviously the thing you would want to vary'),
+        typed('Prompt', 'a watercolour of a harbour at dusk'),
         { kind: 'click', element: el('Send', [['testid', '[data-testid="send"]', 98]]) },
       ],
     },
   })
-  const typeStep = wf.steps.find((s) => s.kind === 'type' && s.value?.includes('{{'))
-  assert.ok(typeStep, 'expected a parameterised type step')
+  const typeStep = wf.steps.find((s) => s.kind === 'type')
   assert.equal(typeStep!.value, '{{prompt}}')
   assert.deepEqual(
     wf.inputs.map((i) => i.name),
@@ -115,14 +115,14 @@ test('the longest typed value becomes a {{placeholder}} and a declared input', (
   assert.equal(wf.inputs[0]!.required, true)
 })
 
-test('a short typed value is left literal — not everything typed is a parameter', () => {
+test('a short typed value is an input too — length was never the question', () => {
   const wf = proposeWorkflow({
-    name: 'literal',
+    name: 'short',
     origins: ['https://x.test'],
     raw: { actions: [typed('Qty', '2'), { kind: 'click', element: el('Go', [['id', '#go', 92]]) }] },
   })
-  assert.equal(wf.steps[0]!.value, '2')
-  assert.equal(wf.inputs.length, 0)
+  assert.equal(wf.steps[0]!.value, '{{qty}}')
+  assert.deepEqual(wf.inputs.map((i) => i.name), ['qty'])
 })
 
 test('a password becomes a manual step that parks, and its value never reaches the workflow', () => {
@@ -325,4 +325,120 @@ test('origins are carried through exactly as recorded, not widened', () => {
     raw: { actions: [{ kind: 'click', element: el('Go', [['id', '#go', 92]]) }] },
   })
   assert.deepEqual(wf.origins, ['https://a.test', 'https://b.test'])
+})
+
+/* ------------------------------------------- kept values vs supplied ones */
+
+/** Typed into a named field of its own, so each one has a distinct target key.
+ *  The shared `typed` helper above deliberately reuses one selector, which is
+ *  what makes it useful for the collapsing test and useless for this group. */
+const into = (label: string, id: string, value: string, extra: Record<string, unknown> = {}) => ({
+  kind: 'type',
+  element: { tag: 'textarea', type: null, label, selectors: [{ strategy: 'id', value: id, score: 92 }] },
+  value,
+  ...extra,
+})
+
+const LONG_CONSTANT =
+  'You are a careful assistant. Answer in plain language, never invent a citation, and keep every reply under two paragraphs.'
+
+test('every typed field is an input, however many there are', () => {
+  const wf = proposeWorkflow({
+    name: 'several',
+    origins: ['https://x.test'],
+    raw: {
+      actions: [
+        into('Prompt', '#prompt', 'a harbour at dusk'),
+        into('Aspect ratio', '#ratio', '16:9'),
+        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
+      ],
+    },
+  })
+  assert.deepEqual(wf.inputs.map((i) => i.name), ['prompt', 'aspect_ratio'])
+  assert.equal(wf.steps.find((s) => s.note?.includes('Prompt'))!.value, '{{prompt}}')
+  assert.equal(wf.steps.find((s) => s.note?.includes('Aspect'))!.value, '{{aspect_ratio}}')
+})
+
+test('a field kept as a static value is replayed exactly, and asks for nothing', () => {
+  // The one thing the person has to say: this text is setup, not a value. It is
+  // said by ticking the field in the panel, and the text they typed is what is
+  // kept.
+  const wf = proposeWorkflow({
+    name: 'kept',
+    origins: ['https://x.test'],
+    raw: {
+      actions: [
+        into('Instructions', '#sys', LONG_CONSTANT, { role: 'fixed' }),
+        into('Prompt', '#prompt', 'a harbour at dusk'),
+        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
+      ],
+    },
+  })
+  assert.equal(wf.steps.find((s) => s.note?.includes('Instructions'))!.value, LONG_CONSTANT)
+  assert.deepEqual(wf.inputs.map((i) => i.name), ['prompt'])
+})
+
+test('length decides nothing — the long field is the input if it was not kept', () => {
+  // The old rule made the longest typed value the parameter, which inverted
+  // exactly this case: a long constant typed once as setup became the thing the
+  // caller had to supply, and the short thing that actually varies was frozen.
+  const wf = proposeWorkflow({
+    name: 'not-length',
+    origins: ['https://x.test'],
+    raw: {
+      actions: [
+        into('Instructions', '#sys', LONG_CONSTANT),
+        into('Seed', '#seed', '4471', { role: 'fixed' }),
+        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
+      ],
+    },
+  })
+  assert.deepEqual(wf.inputs.map((i) => i.name), ['instructions'])
+  assert.equal(wf.steps.find((s) => s.note?.includes('Seed'))!.value, '4471')
+})
+
+test('a workflow can keep every value and take nothing at all', () => {
+  const wf = proposeWorkflow({
+    name: 'all-kept',
+    origins: ['https://x.test'],
+    raw: {
+      actions: [
+        into('Instructions', '#sys', LONG_CONSTANT, { role: 'fixed' }),
+        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
+      ],
+    },
+  })
+  assert.equal(wf.inputs.length, 0, 'a workflow that takes nothing is a valid workflow')
+  assert.equal(wf.steps[0]!.value, LONG_CONSTANT)
+})
+
+test('keeping a value survives going back to correct a typo in it', () => {
+  const wf = proposeWorkflow({
+    name: 'collapse-role',
+    origins: ['https://x.test'],
+    raw: {
+      actions: [
+        into('Instructions', '#sys', 'You are a careful', { role: 'fixed' }),
+        into('Instructions', '#sys', LONG_CONSTANT),
+        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
+      ],
+    },
+  })
+  assert.equal(wf.inputs.length, 0, 'the mark is on the field, not on one keystroke burst')
+  assert.equal(wf.steps[0]!.value, LONG_CONSTANT, 'and the last value typed is the one kept')
+})
+
+test('a password is never an input — its value was never recorded', () => {
+  const wf = proposeWorkflow({
+    name: 'secret-not-input',
+    origins: ['https://x.test'],
+    raw: {
+      actions: [
+        into('Password', '#pw', 'hunter2', { secret: true }),
+        into('Prompt', '#prompt', 'a harbour at dusk'),
+        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
+      ],
+    },
+  })
+  assert.deepEqual(wf.inputs.map((i) => i.name), ['prompt'])
 })
