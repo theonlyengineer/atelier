@@ -1,14 +1,15 @@
 /**
- * The recorder and the replay engine, in a real browser.
+ * The control panel and the replay engine, in a real browser.
  *
- * These two files are the ones that could not be tested before, and they are
- * exactly the two where the expensive bugs lived: a recorder that captured
- * every click but not the prompt, and a capture step that could only be
- * recorded by clicking a result that already existed — which is to say, could
- * never record the wait that produced it.
+ * These two files are the ones that cannot be tested any other way, and they
+ * are exactly the two where the expensive bugs have always lived. They are also
+ * one file's worth of behaviour twice over now, because the panel performs each
+ * step *through* the replay engine as it is recorded — so a bug in the executor
+ * shows up while somebody is still looking at the page rather than a week later
+ * on the first run.
  *
  * The content scripts expect a `chrome.runtime`; a small stub stands in for the
- * service worker and collects what would have been sent to it. Everything else
+ * service worker and holds the recording the panel is editing. Everything else
  * is the real file, running against real DOM.
  *
  * Skipped, rather than failed, when there is no Chrome to drive: this suite has
@@ -32,19 +33,44 @@ const CHROME = [
 
 const RECORDER = readFileSync(join(EXT, 'recorder.js'), 'utf-8')
 const REPLAY = readFileSync(join(EXT, 'replay.js'), 'utf-8')
+const OVERLAY_CSS = readFileSync(join(EXT, 'overlay.css'), 'utf-8')
 
-/** Stands in for the service worker: collects the actions the recorder emits
- *  and lets the test drive `record.begin` / `record.end`. */
+/**
+ * Stands in for the service worker.
+ *
+ * It holds the recording, because that is where the recording really lives —
+ * the panel reads it back after every change rather than keeping its own copy,
+ * so a stub that merely collected messages would not exercise the loop that
+ * actually runs.
+ */
 const CHROME_STUB = `
   window.__sent = []
   window.__listeners = []
+  window.__rec = {
+    mode: 'workflow', name: 'test', tabId: 1,
+    origins: [location.origin], startUrl: location.href, steps: [],
+  }
   window.chrome = {
     runtime: {
       // Real Chrome always has an id; it goes undefined only when the context
-      // has been invalidated, which is exactly what the recorder checks for.
+      // has been invalidated, which is exactly what the panel checks for.
       id: 'test-extension-id',
       lastError: undefined,
-      sendMessage: (msg, cb) => { window.__sent.push(msg); cb && cb({ ok: true, count: window.__sent.length }) },
+      sendMessage: (msg, cb) => {
+        window.__sent.push(msg)
+        let res = { ok: true }
+        if (msg.t === 'record.state') res = { recording: window.__rec }
+        else if (msg.t === 'record.name') { window.__rec.name = msg.name }
+        else if (msg.t === 'record.addStep') {
+          window.__rec.steps.push(msg.step)
+          res = { ok: true, steps: window.__rec.steps.length }
+        }
+        else if (msg.t === 'record.restart') { window.__rec.steps = [] }
+        else if (msg.t === 'record.setStepValue') {
+          Object.assign(window.__rec.steps[msg.index], msg.patch)
+        }
+        cb && cb(res)
+      },
       onMessage: { addListener: (fn) => window.__listeners.push(fn) },
     },
   }
@@ -53,7 +79,7 @@ const CHROME_STUB = `
     for (const fn of window.__listeners) fn(msg, null, (res) => { if (!answered) { answered = true; r(res) } })
     setTimeout(() => { if (!answered) r(null) }, 50)
   })
-  window.__actions = () => window.__sent.filter((m) => m.t === 'record.action').map((m) => m.action)
+  window.__steps = () => window.__rec.steps
 `
 
 let browser: any = null
@@ -73,167 +99,32 @@ after(async () => {
   await browser?.close()
 })
 
-async function pageWith(html: string) {
+const skip = { skip: CHROME ? false : 'no Chrome on this machine' }
+
+/** A page with the panel open on it, exactly as the worker would leave one. */
+async function pageWith(html: string, rec: Record<string, unknown> = {}) {
   const page = await browser.newPage()
-  await page.setContent(`<!doctype html><html><body>${html}</body></html>`)
+  await page.setViewport({ width: 1100, height: 800 })
+  await page.setContent(
+    `<!doctype html><html><head><style>${OVERLAY_CSS}</style></head><body>${html}</body></html>`,
+  )
   await page.evaluate(CHROME_STUB)
+  if (Object.keys(rec).length) await page.evaluate(`Object.assign(window.__rec, ${JSON.stringify(rec)})`)
+  // replay.js first, because the panel performs each step through it.
+  await page.evaluate(REPLAY)
   await page.evaluate(RECORDER)
-  await page.evaluate(`window.__tell({ t: 'record.begin', draftName: 'test', mode: 'workflow', count: 0 })`)
+  await page.evaluate(`window.__tell({ t: 'record.begin', recording: window.__rec })`)
   return page
 }
 
-const skip = { skip: CHROME ? false : 'no Chrome on this machine' }
+/** Point at an element and let the composer come back with it. */
+async function pointAt(page: any, selector: string) {
+  await page.click('#atelier-root [data-act="pick"]')
+  await page.click(selector)
+  await page.waitForSelector('#atelier-root .at-card')
+}
 
-/* ---------------------------------------------------------- the recorder */
-
-test('a click is recorded with every selector candidate the element offers', skip, async () => {
-  const page = await pageWith(
-    `<button id="go" data-testid="generate" aria-label="Generate">Generate</button>`,
-  )
-  await page.click('#go')
-  const actions = await page.evaluate('window.__actions()')
-
-  const click = actions.find((a: any) => a.kind === 'click')
-  assert.ok(click, 'the click should have been recorded')
-  const strategies = click.element.selectors.map((s: any) => s.strategy)
-  // The fallback list is the whole resilience story. One selector is not a
-  // recording, it is a guess.
-  assert.ok(strategies.includes('testid'))
-  assert.ok(strategies.includes('id'))
-  assert.ok(strategies.includes('aria'))
-  assert.ok(strategies.includes('xpath'))
-  await page.close()
-})
-
-test('typing into a contenteditable is recorded — the bug that lost the only step that mattered', skip, async () => {
-  const page = await pageWith(`<div id="editor" contenteditable="true"></div>`)
-  await page.click('#editor')
-  await page.type('#editor', 'the prompt text')
-  // The recorder debounces at 600ms so one field is one step, not one keystroke.
-  await new Promise((r) => setTimeout(r, 900))
-
-  const actions = (await page.evaluate('window.__actions()')) as any[]
-  const typed = actions.find((a) => a.kind === 'type')
-  assert.ok(typed, 'typing into a contenteditable must be recorded')
-  assert.equal(typed.value, 'the prompt text')
-  assert.equal(typed.contentEditable, true)
-  await page.close()
-})
-
-test('a password is recorded as a step, but its value never is', skip, async () => {
-  const page = await pageWith(`<input id="pw" type="password" />`)
-  await page.click('#pw')
-  await page.type('#pw', 'hunter2')
-  await new Promise((r) => setTimeout(r, 900))
-
-  const actions = (await page.evaluate('window.__actions()')) as any[]
-  const typed = actions.find((a) => a.kind === 'type')
-  assert.ok(typed)
-  assert.equal(typed.secret, true)
-  assert.equal(typed.value, null)
-  assert.equal(JSON.stringify(actions).includes('hunter2'), false)
-  await page.close()
-})
-
-test('a result can be captured before it exists — the recorder waits for it', skip, async () => {
-  // This is the finding the whole rewrite is for. At the moment you click
-  // Generate there is nothing to point at, so a recorder that captures by
-  // clicking a finished image can never record the wait that produced it.
-  const page = await pageWith(`
-    <button id="go">Generate</button>
-    <div id="output" style="width:400px;height:300px"></div>
-  `)
-
-  // Arm capture, then point at the empty region.
-  await page.evaluate(`document.querySelector('#atelier-bar [data-act="capture"]').click()`)
-  await page.click('#output')
-
-  let actions = (await page.evaluate('window.__actions()')) as any[]
-  assert.equal(
-    actions.filter((a) => a.kind === 'capture').length,
-    0,
-    'nothing has appeared yet, so there is nothing to capture',
-  )
-
-  // The result turns up later, the way a generated one does.
-  await page.evaluate(`
-    const img = document.createElement('img')
-    img.id = 'result'
-    // A real 128px PNG. A malformed one decodes to naturalWidth 0, which the
-    // recorder correctly refuses — so the fixture has to be a genuine image.
-    img.src = 'data:image/png;base64,' + 'iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABMElEQVR4nO3RMQ0AIADAMMC/MG5uxCCjB6uCJZv73BFn6YDfNQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA/X5gN2K9J4RQAAAABJRU5ErkJggg=='
-    document.querySelector('#output').appendChild(img)
-  `)
-  await page.waitForFunction(`window.__actions().some((a) => a.kind === 'capture')`, { timeout: 4000 })
-
-  actions = (await page.evaluate('window.__actions()')) as any[]
-  const capture = actions.find((a) => a.kind === 'capture')
-  assert.ok(capture, 'the observer should have resolved the result once it appeared')
-  assert.equal(capture.resolvedByObserver, true)
-  assert.equal(capture.capture.as, 'image')
-  // And it resolved against the image itself, not the container it was aimed at.
-  assert.equal(capture.element.tag, 'img')
-  await page.close()
-})
-
-test('a spinner in the target region is not mistaken for the result', skip, async () => {
-  const page = await pageWith(`<div id="output" style="width:400px;height:300px"></div>`)
-  await page.evaluate(`document.querySelector('#atelier-bar [data-act="capture"]').click()`)
-  await page.click('#output')
-
-  await page.evaluate(`
-    const spinner = document.createElement('img')
-    spinner.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=='
-    document.querySelector('#output').appendChild(spinner)
-  `)
-  await new Promise((r) => setTimeout(r, 500))
-
-  const actions = (await page.evaluate('window.__actions()')) as any[]
-  assert.equal(
-    actions.filter((a) => a.kind === 'capture').length,
-    0,
-    'capturing the loading indicator and calling the job done is the failure this guards',
-  )
-  await page.close()
-})
-
-test('a result that is already on screen is captured immediately, not waited for', skip, async () => {
-  const page = await pageWith(`
-    <div id="output"><pre>a block of already-rendered text long enough to count as a result</pre></div>
-  `)
-  await page.evaluate(`document.querySelector('#atelier-bar [data-act="capture"]').click()`)
-  await page.click('#output')
-  await page.waitForFunction(`window.__actions().some((a) => a.kind === 'capture')`, { timeout: 3000 })
-
-  const actions = (await page.evaluate('window.__actions()')) as any[]
-  const capture = actions.find((a) => a.kind === 'capture')
-  assert.equal(capture.capture.as, 'text', 'the kind is inferred from what turned up')
-  assert.equal(capture.resolvedByObserver, false)
-  await page.close()
-})
-
-test('the wait gesture records a condition rather than a click', skip, async () => {
-  const page = await pageWith(`<div id="spinner">Loading…</div>`)
-  await page.evaluate(`document.querySelector('#atelier-bar [data-act="wait"]').click()`)
-  await page.click('#spinner')
-
-  const actions = (await page.evaluate('window.__actions()')) as any[]
-  const wait = actions.find((a) => a.kind === 'wait')
-  assert.ok(wait, 'pointing at something while armed should record a wait')
-  assert.equal(wait.wait.kind, 'visible')
-  // And it must not also be recorded as a click, or replay would click a
-  // spinner on the way past.
-  assert.equal(actions.filter((a) => a.kind === 'click').length, 0)
-  await page.close()
-})
-
-test('the recorder bar does not record itself', skip, async () => {
-  const page = await pageWith(`<button id="go">Go</button>`)
-  await page.evaluate(`document.querySelector('#atelier-bar [data-act="undo"]').click()`)
-  const actions = (await page.evaluate('window.__actions()')) as any[]
-  assert.equal(actions.filter((a) => a.kind === 'click').length, 0)
-  await page.close()
-})
+const compose = (page: any, script: string) => page.evaluate(script)
 
 /* ------------------------------------------------------------- replay */
 
@@ -405,947 +296,782 @@ test('a wrapper with nothing in it yet parks, and says so without guessing the k
   await page.close()
 })
 
-/* ------------------------------------------------------------- the panel */
 
-/**
- * The side panel, in a real browser, with the service worker stubbed.
- *
- * The panel had no coverage at all, which is uncomfortable for the surface
- * where a person makes a decision that changes what a workflow is. `chrome` is
- * a stub that answers `panel.hello` and records what the panel sends back, so
- * these tests are about what is rendered and what is dispatched — not about the
- * worker, which has its own failure modes.
- */
+/* ------------------------------------------------- replay, the new verbs */
+
+test('a tick is set rather than toggled, so a box that starts the other way round still ends right', skip, async () => {
+  const page = await replayPage(`<input type="checkbox" id="opt" checked>`)
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'check', timeoutMs: 1000, target: 'Remember me',
+    selectors: [{ strategy: 'id', value: '#opt', score: 92 }],
+  })`)) as any
+  assert.equal(result.ok, true)
+  // Already ticked. A toggle would have unticked it, which is the opposite of
+  // what was recorded — and a bug that only appears on somebody else's account.
+  assert.equal(await page.evaluate(`document.querySelector('#opt').checked`), true)
+  await page.close()
+})
+
+test('untick sets it off from either starting state', skip, async () => {
+  const page = await replayPage(`<input type="checkbox" id="opt">`)
+  await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'uncheck', timeoutMs: 1000,
+    selectors: [{ strategy: 'id', value: '#opt', score: 92 }],
+  })`)
+  assert.equal(await page.evaluate(`document.querySelector('#opt').checked`), false)
+  await page.close()
+})
+
+test('a choice is matched on the option text, which is the part the person read', skip, async () => {
+  const page = await replayPage(
+    `<select id="size"><option value="s">Small</option><option value="l">Large</option></select>`,
+  )
+  await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'select', timeoutMs: 1000, value: 'Large',
+    selectors: [{ strategy: 'id', value: '#size', score: 92 }],
+  })`)
+  assert.equal(await page.evaluate(`document.querySelector('#size').value`), 'l')
+  await page.close()
+})
+
+test('capturing a placeholder reads the placeholder, not what is in the field', skip, async () => {
+  const page = await replayPage(`<input id="q" placeholder="Search the archive" value="typed text">`)
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'capture', timeoutMs: 1000,
+    capture: { as: 'text', from: 'placeholder' },
+    selectors: [{ strategy: 'id', value: '#q', score: 92 }],
+  })`)) as any
+  assert.equal(result.capture.value, 'Search the archive')
+  await page.close()
+})
+
+test('capturing a field reads what is in it', skip, async () => {
+  const page = await replayPage(`<input id="q" placeholder="Search" value="what was typed">`)
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'capture', timeoutMs: 1000,
+    capture: { as: 'text', from: 'value' },
+    selectors: [{ strategy: 'id', value: '#q', score: 92 }],
+  })`)) as any
+  assert.equal(result.capture.value, 'what was typed')
+  await page.close()
+})
+
+test('replay never resolves onto Atelier’s own furniture', skip, async () => {
+  // The panel is in the document while a step is being recorded, and the step
+  // is performed through this same executor at that moment. A text selector
+  // looking for Save would otherwise find the panel’s own Save button.
+  const page = await replayPage(
+    `<div id="atelier-root"><button onclick="document.body.dataset.hit='ours'">Save workflow</button></div>
+     <button id="real" onclick="document.body.dataset.hit='page'">Save workflow</button>`,
+  )
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'click', timeoutMs: 800,
+    selectors: [{ strategy: 'text', value: 'Save workflow', score: 96 }],
+  })`)) as any
+  assert.equal(result.ok, true)
+  assert.equal(await page.evaluate(`document.body.dataset.hit`), 'page')
+  await page.close()
+})
+
+/* -------------------------------------------------------- the launcher */
+
+test('collapsed, Atelier is one square with an A in it', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await page.click('#atelier-root [data-act="collapse"]')
+  assert.equal(await page.evaluate(`document.querySelector('#atelier-panel').hidden`), true)
+  const glyph = await page.evaluate(`document.querySelector('#atelier-launcher .at-glyph').textContent`)
+  assert.equal(glyph, 'A')
+  await page.close()
+})
+
+test('the launcher opens the panel, and the panel is most of the window', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await page.click('#atelier-root [data-act="collapse"]')
+  await page.click('#atelier-launcher')
+  const box = await page.evaluate(`(() => {
+    const r = document.querySelector('#atelier-panel').getBoundingClientRect()
+    return { w: r.width, h: r.height, vh: window.innerHeight }
+  })()`)
+  assert.ok((box as any).h / (box as any).vh > 0.85, 'about nine tenths of the window, vertically')
+  assert.ok((box as any).w >= 500, 'wide enough that a step box does not become a column of single words')
+  await page.close()
+})
+
+test('the launcher can be dragged, and cannot be dragged out of the window', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await page.click('#atelier-root [data-act="collapse"]')
+  const start = await page.evaluate(`(() => {
+    const r = document.querySelector('#atelier-launcher').getBoundingClientRect()
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+  })()`)
+  await page.mouse.move((start as any).x, (start as any).y)
+  await page.mouse.down()
+  // Far past the top left corner. A fixed overlay pushed past an edge is not
+  // scrolled back by anything, so it would simply be gone.
+  await page.mouse.move(-500, -500, { steps: 6 })
+  await page.mouse.up()
+  const box = await page.evaluate(`(() => {
+    const r = document.querySelector('#atelier-launcher').getBoundingClientRect()
+    return { left: r.left, top: r.top }
+  })()`)
+  assert.ok((box as any).left >= 0 && (box as any).top >= 0, 'clamped back inside')
+  await page.close()
+})
+
+/* ----------------------------------------------------------- composing */
+
+test('pointing at a button proposes its text as the name', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate image</button>`)
+  await pointAt(page, '#go')
+  const name = await page.evaluate(`document.querySelector('#atelier-root .at-card .at-input').value`)
+  assert.equal(name, 'Generate image')
+  await page.close()
+})
+
+test('pointing at a field proposes what it asks for, not what is in it', skip, async () => {
+  const page = await pageWith(`<input id="p" placeholder="Describe the image" value="a rope bridge">`)
+  await pointAt(page, '#p')
+  const name = await page.evaluate(`document.querySelector('#atelier-root .at-card .at-input').value`)
+  assert.equal(name, 'Describe the image')
+  await page.close()
+})
+
+test('the actions offered are the ones that element can actually take', skip, async () => {
+  const page = await pageWith(
+    `<button id="go">Generate</button>
+     <input id="p" placeholder="Prompt">
+     <input id="c" type="checkbox">
+     <img id="out" src="https://example.test/x.png" alt="Result">`,
+  )
+  const actionsFor = async (selector: string) => {
+    await pointAt(page, selector)
+    const ids = await page.evaluate(
+      `[...document.querySelectorAll('#atelier-root [data-role="action"] option')].map(o => o.value)`,
+    )
+    await page.click('#atelier-root [data-act="cancel"]')
+    return ids as string[]
+  }
+
+  const button = await actionsFor('#go')
+  assert.equal(button[0], 'click', 'the first action offered is the obvious one for the element')
+  assert.ok(!button.includes('type'), 'a button cannot be typed into')
+  assert.ok(!button.includes('check'), 'and it is not a checkbox')
+
+  const field = await actionsFor('#p')
+  assert.equal(field[0], 'type')
+  assert.ok(field.includes('clear'))
+  assert.ok(field.includes('capture_placeholder'))
+
+  const box = await actionsFor('#c')
+  assert.ok(box.includes('check') && box.includes('uncheck'))
+  assert.ok(!box.includes('type'))
+
+  const image = await actionsFor('#out')
+  assert.equal(image[0], 'capture_media')
+  await page.close()
+})
+
+test('a password offers only the step that stops and hands the keyboard back', skip, async () => {
+  const page = await pageWith(`<input id="pw" type="password" placeholder="Password">`)
+  await page.evaluate(`document.querySelector('#pw').value = 'hunter2'`)
+  await pointAt(page, '#pw')
+  const ids = await page.evaluate(
+    `[...document.querySelectorAll('#atelier-root [data-role="action"] option')].map(o => o.value)`,
+  )
+  assert.deepEqual(ids, ['manual'])
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  const step = await page.evaluate(`window.__steps()[0]`)
+  assert.equal((step as any).kind, 'manual')
+  // Not the value, and not inside a selector either.
+  assert.ok(!JSON.stringify(step).includes('hunter2'))
+  await page.close()
+})
+
+/* ------------------------------------------------------ adding a step */
+
+test('Atelier performs the step, so the page is where a real run would leave it', skip, async () => {
+  const page = await pageWith(
+    `<button id="go" onclick="document.body.dataset.clicked='yes'">Generate</button>`,
+  )
+  await pointAt(page, '#go')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  assert.equal(await page.evaluate(`document.body.dataset.clicked`), 'yes')
+  await page.close()
+})
+
+test('typing a step types it, and the recorded value is what was typed', skip, async () => {
+  const page = await pageWith(`<input id="p" placeholder="Prompt">`)
+  await pointAt(page, '#p')
+  await page.evaluate(`(() => {
+    const area = document.querySelector('#atelier-root .at-area')
+    area.value = 'a rope bridge'
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  assert.equal(await page.evaluate(`document.querySelector('#p').value`), 'a rope bridge')
+  const step = (await page.evaluate(`window.__steps()[0]`)) as any
+  assert.equal(step.sampleValue, 'a rope bridge')
+  assert.equal(step.valueMode, 'static', 'kept by default, because the agent must not be handed setup')
+  await page.close()
+})
+
+test('a step that cannot be performed is refused, while there is still somebody looking at the page', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await pointAt(page, '#go')
+  // Rename it to something the page has never heard of, and take the element
+  // away, so neither the name nor the fallbacks can find anything.
+  await page.evaluate(`(() => {
+    const input = document.querySelector('#atelier-root .at-card .at-input')
+    input.value = 'Nothing like this'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    document.querySelector('#go').remove()
+  })()`)
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForSelector('#atelier-root .at-error')
+  assert.equal(await page.evaluate(`window.__steps().length`), 0, 'nothing was kept')
+  await page.close()
+})
+
+test('a name the page does not answer to is still the step name, and the fallbacks still find it', skip, async () => {
+  const page = await pageWith(`<button id="go" data-testid="generate">Generate</button>`)
+  await pointAt(page, '#go')
+  await page.evaluate(`(() => {
+    const input = document.querySelector('#atelier-root .at-card .at-input')
+    input.value = 'The big orange button'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  const step = (await page.evaluate(`window.__steps()[0]`)) as any
+  assert.equal(step.target, 'The big orange button')
+  // No identifier selector: keeping one that does not resolve would read as
+  // decay forever afterwards.
+  assert.equal(step.identifier, null)
+  assert.ok(step.selectors.some((s: any) => s.strategy === 'testid'))
+  await page.close()
+})
+
+test('the panel never records itself', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await page.click('#atelier-root [data-act="pick"]')
+  // A click on our own furniture while pointing is not a choice about the page.
+  await page.click('#atelier-launcher')
+  assert.equal(
+    await page.evaluate(`document.documentElement.classList.contains('at-picking')`),
+    true,
+    'still armed, still waiting for a real target',
+  )
+  await page.close()
+})
+
+/* --------------------------------------------------------- the pipeline */
+
+test('the steps read bottom to top, numbered in the order they run', skip, async () => {
+  const page = await pageWith(`<button id="a">First</button><button id="b">Second</button>`)
+  await pointAt(page, '#a')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  await pointAt(page, '#b')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 2`)
+
+  const order = await page.evaluate(
+    `[...document.querySelectorAll('#atelier-root .at-step')].map(li => li.querySelector('.at-node').textContent)`,
+  )
+  // Newest at the top, directly under the composer that made it; step one at
+  // the bottom, so the sequence still reads as one line.
+  assert.deepEqual(order, ['2', '1'])
+  await page.close()
+})
+
+test('each step box says what it acts on and what it does', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate image</button>`)
+  await pointAt(page, '#go')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForSelector('#atelier-root .at-step')
+  const rows = await page.evaluate(
+    `[...document.querySelectorAll('#atelier-root .at-step .at-row')].map(r =>
+      [r.querySelector('.at-k').textContent, r.querySelector('.at-v').textContent])`,
+  )
+  assert.deepEqual(rows, [['Target', 'Generate image'], ['Action', 'Click it']])
+  await page.close()
+})
+
+test('a step cannot be removed on its own — starting over is the only way back', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await pointAt(page, '#go')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForSelector('#atelier-root .at-step')
+
+  const removers = await page.evaluate(
+    `document.querySelectorAll('#atelier-root .at-step [data-act="remove"], #atelier-root .at-step [data-remove]').length`,
+  )
+  assert.equal(removers, 0, 'no per-step delete anywhere')
+
+  await page.click('#atelier-root [data-act="restart"]')
+  await page.waitForSelector('#atelier-root .at-modal:not([hidden])')
+  await page.click('#atelier-root .at-modal .at-danger')
+  await page.waitForFunction(`window.__steps().length === 0`)
+  await page.close()
+})
+
+test('an action cannot be changed after the fact, but a value can', skip, async () => {
+  const page = await pageWith(`<input id="p" placeholder="Prompt">`)
+  await pointAt(page, '#p')
+  await page.evaluate(`(() => {
+    const area = document.querySelector('#atelier-root .at-area')
+    area.value = 'a rope bridge'
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForSelector('#atelier-root .at-step')
+
+  // No way back to the action.
+  assert.equal(
+    await page.evaluate(`document.querySelectorAll('#atelier-root .at-step [data-role="action"]').length`),
+    0,
+  )
+
+  await page.click('#atelier-root .at-step [data-edit]')
+  await page.waitForSelector('#atelier-root .at-edit')
+  await page.click('#atelier-root .at-edit [data-mode="dynamic"]')
+  await page.waitForSelector('#atelier-root .at-edit [data-role="edit-name"]')
+  await page.evaluate(`(() => {
+    const area = document.querySelector('#atelier-root .at-edit [data-role="edit-value"]')
+    area.value = 'a rope bridge with its planks missing'
+  })()`)
+  await page.click('#atelier-root .at-edit [data-save-edit]')
+  await page.waitForFunction(`window.__steps()[0].valueMode === 'dynamic'`)
+  const step = (await page.evaluate(`window.__steps()[0]`)) as any
+  assert.equal(step.valueMode, 'dynamic')
+  assert.equal(step.sampleValue, 'a rope bridge with its planks missing')
+  await page.close()
+})
+
+test('a dynamic value keeps the text it was recorded with, for a test run', skip, async () => {
+  const page = await pageWith(`<input id="p" placeholder="Prompt">`)
+  await pointAt(page, '#p')
+  await page.evaluate(`(() => {
+    const area = document.querySelector('#atelier-root .at-area')
+    area.value = 'a rope bridge'
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await page.click('#atelier-root [data-mode="dynamic"]')
+  await page.waitForSelector('#atelier-root .at-sub-field')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  const step = (await page.evaluate(`window.__steps()[0]`)) as any
+  assert.equal(step.valueMode, 'dynamic')
+  assert.equal(step.sampleValue, 'a rope bridge', 'kept, so a test run has something real to type')
+  assert.equal(step.inputName, 'prompt')
+  await page.close()
+})
+
+/* ------------------------------------------------------------ dialogs */
+
+test('an unnamed recording asks for a name in the page, in Atelier’s own dialog', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`, { name: '' })
+  await page.waitForSelector('#atelier-root .at-modal:not([hidden])')
+  const title = await page.evaluate(`document.querySelector('#atelier-root .at-modal h2').textContent`)
+  assert.match(title as string, /name this workflow/i)
+  await page.evaluate(`(() => {
+    const input = document.querySelector('#atelier-root .at-modal .at-input')
+    input.value = 'Export invoices'
+  })()`)
+  await page.click('#atelier-root .at-modal .at-primary')
+  // The name goes to the worker as typed; turning it into a slug is the
+  // worker's job, so that one rule lives in one place rather than in every
+  // surface that can ask for a name.
+  await page.waitForFunction(`window.__sent.some(m => m.t === 'record.name')`)
+  const named = (await page.evaluate(`window.__sent.find(m => m.t === 'record.name')`)) as any
+  assert.equal(named.name, 'Export invoices')
+  await page.close()
+})
+
+test('nothing in the panel reaches for the browser’s own prompt, confirm or alert', skip, async () => {
+  // They are modal to the whole tab, cannot be styled, and read as though the
+  // *site* is asking at the exact moment the question is about Atelier.
+  const source = readFileSync(join(EXT, 'recorder.js'), 'utf-8')
+  for (const banned of ['window.prompt(', 'window.confirm(', 'window.alert(', /(^|[^.\w])confirm\(/]) {
+    if (typeof banned === 'string') assert.ok(!source.includes(banned), `found ${banned}`)
+    else assert.ok(!banned.test(source), 'found a bare confirm(')
+  }
+})
+
+/* -------------------------------------------------------------- popup */
+
 const PANEL_DIR = join(HERE, '..', '..', 'extension', 'src', 'panel')
 const PANEL_HTML = readFileSync(join(PANEL_DIR, 'panel.html'), 'utf-8')
-  .replace(/<script[^>]*><\/script>/g, '')
-  .replace(/<link[^>]*>/g, '')
 const PANEL_JS = readFileSync(join(PANEL_DIR, 'panel.js'), 'utf-8')
 const PANEL_CSS = readFileSync(join(PANEL_DIR, 'panel.css'), 'utf-8')
 
-async function panelWith(actions: unknown[]) {
+/**
+ * The popup, with both the worker and the daemon stubbed.
+ *
+ * It talks to the daemon over HTTP directly and to the worker for anything that
+ * needs tabs, so both are replaced and what is asserted is what gets rendered
+ * and what gets dispatched.
+ */
+async function popupWith(workflows: unknown[], origin = 'https://example.test') {
   const page = await browser.newPage()
-  await page.setContent(`<style>${PANEL_CSS}</style>` + PANEL_HTML)
-  await page.evaluate(
-    `
+  await page.setContent(PANEL_HTML.replace(/<script[\s\S]*?<\/script>/, ''))
+  await page.addStyleTag({ content: PANEL_CSS })
+  await page.evaluate(`
     window.__sent = []
     window.chrome = {
       runtime: {
-        sendMessage: (msg) => {
-          window.__sent.push(msg)
-          if (msg.t === 'panel.hello') {
-            return Promise.resolve({ recording: { name: 'test', actions: ${JSON.stringify(actions)} } })
-          }
-          return Promise.resolve({ ok: true })
-        },
+        id: 'x',
+        sendMessage: (msg) => { window.__sent.push(msg); return Promise.resolve({ recording: null, state: {} }) },
         onMessage: { addListener: () => {} },
       },
+      tabs: { query: async () => [{ id: 1, url: ${JSON.stringify(origin)} + '/somewhere' }], create: () => {} },
+      permissions: { contains: async () => true, request: async () => true },
     }
-    `,
-  )
-  await page.evaluate(PANEL_JS)
-  await page.waitForFunction(`document.querySelectorAll('#capture-list li').length > 0`, { timeout: 4000 })
-  return page
-}
-
-const typedAction = (label: string, value: string, extra: Record<string, unknown> = {}) => ({
-  kind: 'type',
-  element: { tag: 'textarea', label, selectors: [{ strategy: 'id', value: '#' + label, score: 92 }] },
-  value,
-  ...extra,
-})
-
-/* --------------------------------------------------- the service worker */
-
-/**
- * The service worker, with the whole of `chrome` stubbed.
- *
- * It had no coverage, and it is the link in the middle of every panel gesture:
- * the panel sends a message, the worker changes the stored recording, and the
- * proposal pass reads what the worker wrote. Both ends were tested and the
- * middle was not, which is the shape of a bug nobody finds until a recording
- * comes back wrong.
- */
-const WORKER_SRC =
-  readFileSync(join(HERE, '..', '..', 'extension', 'src', 'protocol.js'), 'utf-8').replace(
-    /^export /gm,
-    '',
-  ) +
-  '\n' +
-  readFileSync(join(HERE, '..', '..', 'extension', 'src', 'background.js'), 'utf-8').replace(
-    /^import .*$/m,
-    '',
-  )
-
-const WORKER_CHROME = `
-  window.__sessionStore = {}
-  window.__sent = []
-  window.__listeners = []
-  const listener = (fn) => ({ addListener: (f) => fn.push(f) })
-  window.chrome = {
-    runtime: {
-      sendMessage: (msg) => { window.__sent.push(msg); return Promise.resolve({ ok: true }) },
-      onMessage: { addListener: (fn) => window.__listeners.push(fn) },
-      onInstalled: listener([]), onStartup: listener([]),
-      getURL: (p) => 'chrome-extension://test/' + p,
-    },
-    storage: {
-      local: { get: async () => ({ profileId: 'p', label: 'test' }), set: async () => {} },
-      session: {
-        get: async (k) => (k in window.__sessionStore ? { [k]: window.__sessionStore[k] } : {}),
-        set: async (bag) => Object.assign(window.__sessionStore, bag),
-        remove: async (k) => { delete window.__sessionStore[k] },
-      },
-    },
-    tabs: { query: async () => [], sendMessage: async () => {}, create: async () => {},
-            update: async () => {}, onUpdated: listener([]) },
-    action: { setBadgeText: () => {}, setBadgeBackgroundColor: () => {} },
-    alarms: { create: () => {}, onAlarm: listener([]) },
-    notifications: { create: () => {}, clear: () => {}, onClicked: listener([]) },
-    permissions: { contains: async () => true, request: async () => true },
-    scripting: { executeScript: async () => {}, insertCSS: async () => {} },
-    windows: { getCurrent: async () => ({ id: 1 }) },
-  }
-  // connect() runs at load and probes for a daemon. There isn't one; failing
-  // fast is the correct behaviour and is not what these tests are about.
-  window.fetch = () => Promise.reject(new Error('no daemon in this test'))
-  window.WebSocket = function () { this.close = () => {} }
-  window.__ask = (msg) => new Promise((resolve) => {
-    let answered = false
-    for (const fn of window.__listeners) fn(msg, null, (res) => { if (!answered) { answered = true; resolve(res) } })
-    setTimeout(() => { if (!answered) resolve(null) }, 200)
-  })
-`
-
-/** A worker with one recording already in session storage. */
-async function workerWith(actions: unknown[]) {
-  const page = await browser.newPage()
-  await page.setContent('<!doctype html><html><body></body></html>')
-  await page.evaluate(WORKER_CHROME)
-  await page.evaluate(
-    `window.__sessionStore['atelier:recording'] = {
-      draftName: 'test', tabId: 1, actions: ${JSON.stringify(actions)},
-      origins: ['https://x.test'], mode: 'workflow',
-    }`,
-  )
-  await page.evaluate(WORKER_SRC)
-  return page
-}
-
-const typedFor = (label: string, value: string, extra: Record<string, unknown> = {}) => ({
-  kind: 'type',
-  element: { tag: 'textarea', label, selectors: [{ strategy: 'id', value: '#' + label, score: 92 }] },
-  value,
-  ...extra,
-})
-
-test('the worker records a role against the step the review named', skip, async () => {
-  const page = await workerWith([typedFor('Instructions', 'setup'), typedFor('Prompt', 'varies')])
-  const res = (await page.evaluate(
-    `window.__ask({ t: 'record.role', index: 1, role: 'input' })`,
-  )) as any
-  assert.equal(res?.ok, true)
-  const stored = (await page.evaluate(
-    `window.__sessionStore['atelier:recording'].actions.map((a) => a.role ?? null)`,
-  )) as unknown[]
-  assert.deepEqual(stored, [null, 'input'], 'only the named field is marked')
-  await page.close()
-})
-
-test('the mark survives in session storage, not in a module variable', skip, async () => {
-  // MV3 kills the worker between gestures; anything held in memory is gone by
-  // the time the person presses Save.
-  const page = await workerWith([typedFor('Prompt', 'varies')])
-  await page.evaluate(`window.__ask({ t: 'record.role', index: 0, role: 'fixed' })`)
-  assert.equal(
-    await page.evaluate(`window.__sessionStore['atelier:recording'].actions[0].role`),
-    'fixed',
-  )
-  await page.close()
-})
-
-test('clearing a role removes the key rather than storing an empty one', skip, async () => {
-  const page = await workerWith([typedFor('Prompt', 'varies', { role: 'input' })])
-  await page.evaluate(`window.__ask({ t: 'record.role', index: 0, role: null })`)
-  assert.equal(
-    await page.evaluate(`'role' in window.__sessionStore['atelier:recording'].actions[0]`),
-    false,
-    'an absent role is what hands the field back to the guess',
-  )
-  await page.close()
-})
-
-test('a password cannot be made an input, because its value was never recorded', skip, async () => {
-  const page = await workerWith([typedFor('Password', '', { secret: true })])
-  const res = (await page.evaluate(
-    `window.__ask({ t: 'record.role', index: 0, role: 'input' })`,
-  )) as any
-  assert.match(res?.error ?? '', /password/i)
-  await page.close()
-})
-
-test('a click cannot be made an input — there is no value to vary', skip, async () => {
-  const page = await workerWith([{ kind: 'click', element: { tag: 'button', label: 'Run', selectors: [] } }])
-  const res = (await page.evaluate(
-    `window.__ask({ t: 'record.role', index: 0, role: 'input' })`,
-  )) as any
-  assert.match(res?.error ?? '', /typed field/i)
-  await page.close()
-})
-
-test('the worker pushes the updated list back, so every surface shows the truth', skip, async () => {
-  const page = await workerWith([typedFor('Prompt', 'varies')])
-  await page.evaluate(`window.__ask({ t: 'record.role', index: 0, role: 'input' })`)
-  const pushed = (await page.evaluate(
-    `window.__sent.filter((m) => m.t === 'panel.recording').pop()`,
-  )) as any
-  assert.equal(pushed?.recording?.actions?.[0]?.role, 'input')
-  await page.close()
-})
-
-/* ------------------------------------------------------ the recorder bar */
-
-const OVERLAY_CSS = readFileSync(join(EXT, 'overlay.css'), 'utf-8')
-
-/** A page with the recorder running and its stylesheet applied, at a width a
- *  laptop actually has. */
-async function barPage(width = 1000) {
-  const page = await browser.newPage()
-  await page.setViewport({ width, height: 700 })
-  await page.setContent(`<!doctype html><html><head><style>${OVERLAY_CSS}</style></head><body></body></html>`)
-  await page.evaluate(CHROME_STUB)
-  await page.evaluate(RECORDER)
-  await page.evaluate(
-    `window.__tell({ t: 'record.begin', draftName: 'audio-generation', mode: 'workflow', count: 0 })`,
-  )
-  await page.waitForFunction(`document.getElementById('atelier-bar')`, { timeout: 4000 })
-  return page
-}
-
-/** How many lines each piece of text in the bar is laid out on. */
-const lineCounts = (page: any) =>
-  page.evaluate(`
-    [...document.querySelectorAll('#atelier-bar .atelier-btn, #atelier-bar .atelier-count')].map((el) => {
-      const range = document.createRange()
-      range.selectNodeContents(el)
-      return { text: el.textContent.trim(), lines: range.getClientRects().length }
+    window.close = () => { window.__closed = true }
+    window.fetch = async (url) => ({
+      ok: true,
+      json: async () => url.indexOf('/health') >= 0
+        ? { ok: true }
+        : { ok: true, result: { jobs: [], browsers: [{ label: 'chrome' }], workflows: ${JSON.stringify(workflows)} } },
     })
   `)
-
-test('no label in the recorder bar wraps onto a second line', skip, async () => {
-  // `all: unset` on the buttons resets white-space to normal, so a squeezed bar
-  // wraps "Capture result" inside its own pill rather than staying one row.
-  const page = await barPage()
-  for (const { text, lines } of await lineCounts(page)) {
-    assert.equal(lines, 1, `"${text}" is laid out on ${lines} lines`)
-  }
-  await page.close()
-})
-
-test('the bar may use the whole width of the window, not half of it', skip, async () => {
-  // A fixed element with `left` and no `right` is shrink-to-fit inside what
-  // remains to its right — half the viewport. The transform that re-centres it
-  // does not give that width back, so the bar was cramped at any window size.
-  const page = await barPage()
-  const { barWidth, viewport } = (await page.evaluate(`
-    ({ barWidth: document.getElementById('atelier-bar').getBoundingClientRect().width,
-       viewport: window.innerWidth })
-  `)) as any
-  assert.ok(
-    barWidth > viewport / 2,
-    `the bar is ${Math.round(barWidth)}px inside a ${viewport}px window — still capped at half`,
-  )
-  await page.close()
-})
-
-test('the bar keeps a gutter rather than running edge to edge', skip, async () => {
-  const page = await barPage(620)
-  const gap = (await page.evaluate(
-    `window.innerWidth - document.getElementById('atelier-bar').getBoundingClientRect().width`,
-  )) as number
-  assert.ok(gap >= 20, `only ${Math.round(gap)}px of gutter — the padding is escaping the cap`)
-  await page.close()
-})
-
-test('the bar stays one row, and centred, on a narrow window', skip, async () => {
-  const page = await barPage(760)
-  const box = (await page.evaluate(`
-    const b = document.getElementById('atelier-bar').getBoundingClientRect()
-    ;({ height: b.height, left: b.left, right: window.innerWidth - b.right })
-  `)) as any
-  assert.ok(box.height < 52, `the bar is ${Math.round(box.height)}px tall, so something wrapped`)
-  assert.ok(Math.abs(box.left - box.right) < 2, 'still centred')
-  await page.close()
-})
-
-test('a long workflow name is what gives way, not the controls', skip, async () => {
-  // Truncating the name costs nothing — it is already on screen in the panel.
-  // Wrapping a button changes where it is and what it looks like mid-recording.
-  const page = await barPage(620)
-  // Measured on the element's own box, not on a Range over its contents: with
-  // text-overflow the ellipsis is a box of its own, so a Range reports two
-  // rects for text that is plainly on one line.
-  const name = (await page.evaluate(`
-    const el = document.querySelector('#atelier-bar .atelier-name')
-    ;({ clipped: el.scrollWidth > el.clientWidth, height: el.getBoundingClientRect().height })
-  `)) as any
-  assert.equal(name.clipped, true, 'the name should be truncated at this width')
-  assert.ok(name.height < 24, `the name is ${Math.round(name.height)}px tall, so it wrapped`)
-  for (const { text, lines } of await lineCounts(page)) {
-    assert.equal(lines, 1, `"${text}" wrapped instead of the name giving way`)
-  }
-  await page.close()
-})
-
-/** The bar, on a page whose own CSS is hostile to it. */
-async function barOnPage(pageCss: string, width = 1000) {
-  const page = await browser.newPage()
-  await page.setViewport({ width, height: 700 })
-  await page.setContent(
-    `<!doctype html><html><head><style>${OVERLAY_CSS}</style><style>${pageCss}</style></head><body></body></html>`,
-  )
-  await page.evaluate(CHROME_STUB)
-  await page.evaluate(RECORDER)
-  await page.evaluate(
-    `window.__tell({ t: 'record.begin', draftName: 'audio-generation', mode: 'workflow', count: 0 })`,
-  )
-  await page.waitForFunction(`document.getElementById('atelier-bar')`, { timeout: 4000 })
+  await page.evaluate(PANEL_JS)
+  await page.waitForFunction(`document.querySelectorAll('#here li, #here-empty:not([hidden])').length > 0`)
   return page
 }
 
-const offCentre = (page: any) =>
-  page.evaluate(`
-    const b = document.getElementById('atelier-bar').getBoundingClientRect()
-    Math.abs(b.left - (window.innerWidth - b.right))
-  `)
+const wf = (name: string, origins: string[], over: Record<string, unknown> = {}) => ({
+  name,
+  status: 'active',
+  produces: 'image',
+  steps: 4,
+  origins,
+  inputs: [],
+  health: { state: 'ok' },
+  ...over,
+})
 
-test('the bar stays centred on a page that resets every margin', skip, async () => {
-  // Centring with auto margins puts the bar at the mercy of the page: a reset
-  // like this is common, and it would leave the bar pinned to the left edge.
-  const page = await barOnPage(`* { margin: 0 !important; }`)
-  assert.ok((await offCentre(page)) < 2, 'a margin reset should not move the bar')
+test('the popup lists the workflows of the page you are on, and counts the rest', skip, async () => {
+  const page = await popupWith([
+    wf('generate-image', ['https://example.test']),
+    wf('export-invoices', ['https://elsewhere.test']),
+    wf('fetch-report', ['https://elsewhere.test']),
+  ])
+  const listed = await page.evaluate(
+    `[...document.querySelectorAll('#here .wf-name')].map(e => e.textContent)`,
+  )
+  assert.deepEqual(listed, ['generate-image'])
+  const rest = await page.evaluate(`document.getElementById('elsewhere').textContent`)
+  assert.match(rest as string, /2 more workflows elsewhere/)
   await page.close()
 })
 
-test('the bar stays centred on a page that resets positioning offsets', skip, async () => {
-  const page = await barOnPage(`* { inset: auto; margin-inline: 0 !important; }`)
-  assert.ok((await offCentre(page)) < 2, 'the bar should not depend on the page leaving it alone')
+test('the popup says which site it is filtering by, so the filter is never a mystery', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  const label = await page.evaluate(`document.getElementById('here-label').textContent`)
+  assert.equal(label, 'On example.test')
   await page.close()
 })
 
-test('the bar still fits its controls when the page squeezes it', skip, async () => {
-  const page = await barOnPage(`* { margin: 0 !important; }`, 760)
-  for (const { text, lines } of await lineCounts(page)) {
-    assert.equal(lines, 1, `"${text}" wrapped on a page with a margin reset`)
-  }
+test('a workflow row opens its page on the dashboard rather than expanding in the popup', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  await page.evaluate(`window.__opened = null; chrome.tabs.create = (o) => { window.__opened = o.url }`)
+  await page.click('#here .wf-head')
+  const url = await page.evaluate(`window.__opened`)
+  assert.match(url as string, /#workflow\/generate-image$/)
   await page.close()
 })
 
-test('the popup declares a width, because a popup sizes to its content', skip, async () => {
-  // Chrome gives a popup no width of its own: without one this collapses to
-  // whatever the narrowest line happens to be, which is how a panel built for a
-  // docked side panel looks broken the moment it becomes a dropdown.
-  const page = await panelWith([typedAction('Prompt', 'varies')])
-  const width = (await page.evaluate(`document.body.getBoundingClientRect().width`)) as number
-  // Chrome's ceiling is 800. Well under it is a choice; barely over 300 is the
-  // cramped column this started as.
-  assert.ok(width >= 560 && width <= 800, `the popup body is ${Math.round(width)}px wide`)
+test('starting a recording closes the popup, because the name is asked for in the page', skip, async () => {
+  const page = await popupWith([])
+  await page.click('#record')
+  await page.waitForFunction(`window.__closed === true`)
+  const sent = (await page.evaluate(`window.__sent.map(m => m.t)`)) as string[]
+  assert.ok(sent.includes('panel.record.start'))
+  // The name is not asked for here, so nothing carries one.
+  const start = (await page.evaluate(`window.__sent.find(m => m.t === 'panel.record.start')`)) as any
+  assert.equal(start.name, undefined)
   await page.close()
 })
 
-/* ------------------------------------------- an orphaned content script */
+test('the popup has no getting-started section and no unnecessary status line', skip, async () => {
+  // Both were teaching surfaces in a window that closes when it loses focus.
+  // The first screen a new user sees is now the one on the page they opened it
+  // over, which is where the answer actually is.
+  assert.ok(!/Getting started/i.test(PANEL_HTML))
+  assert.ok(!/id="stamp"/.test(PANEL_HTML))
+  assert.ok(!/id="first-run"/.test(PANEL_HTML))
+})
+
+test('nothing in the popup reaches for the browser’s own alert or confirm', skip, async () => {
+  assert.ok(!/(^|[^.\w])alert\(/.test(PANEL_JS), 'found a bare alert(')
+  assert.ok(!/(^|[^.\w])confirm\(/.test(PANEL_JS), 'found a bare confirm(')
+  assert.ok(!/window\.prompt\(/.test(PANEL_JS))
+})
+
+test('a decaying step can be repointed from the popup, which is where the page is', skip, async () => {
+  // Repointing needs the site open, and the popup is the surface you reach for
+  // while standing on it. The dashboard names this control, so it has to exist.
+  const page = await popupWith([
+    wf('generate-image', ['https://example.test'], {
+      health: {
+        state: 'degraded',
+        summary: '1 of 4 steps is matching on a weaker selector than recorded',
+        degraded: [{ stepId: 's2', note: 'Click Generate', detail: 'now matching on position' }],
+      },
+    }),
+  ])
+  const note = await page.evaluate(`document.querySelector('#here .step-note').textContent`)
+  assert.equal(note, 'Click Generate')
+
+  await page.evaluate(`window.__closed = false`)
+  await page.click('#here .step-row button')
+  await page.waitForFunction(`window.__sent.some(m => m.t === 'panel.step.repoint')`)
+  const sent = (await page.evaluate(`window.__sent.find(m => m.t === 'panel.step.repoint')`)) as any
+  assert.equal(sent.workflowName, 'generate-image')
+  assert.equal(sent.stepId, 's2')
+  await page.close()
+})
+
+test('a healthy workflow offers no repair, so a control is never a control that does nothing', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  assert.equal(await page.evaluate(`document.querySelectorAll('#here .step-row').length`), 0)
+  await page.close()
+})
+
+/* ------------------------------------------------------- the top layer */
 
 /**
- * Reloading the extension at chrome://extensions destroys the context every
- * injected content script belongs to, while the script itself keeps running in
- * the page with its listeners attached. Every `chrome.runtime` call from that
- * point throws "Extension context invalidated" — and the bar is still on screen,
- * so the person keeps clicking it and keeps getting nothing.
+ * A site's own overlay must not bury the panel.
+ *
+ * The reason it could is worth stating, because the fix looks like
+ * over-engineering until you know it: `showModal()` and the popover API put an
+ * element in the **top layer**, which paints above every z-index there is.
+ * 2147483647 is the largest integer CSS will take and it loses to the top layer
+ * every time. So the only way to sit above a site's modal is to be in the top
+ * layer too.
  */
-async function orphanedBar() {
-  const page = await browser.newPage()
-  await page.setViewport({ width: 1000, height: 700 })
-  await page.setContent(
-    `<!doctype html><html><head><style>${OVERLAY_CSS}</style></head><body><button id="x">x</button></body></html>`,
-  )
-  await page.evaluate(CHROME_STUB)
-  await page.evaluate(RECORDER)
-  await page.evaluate(
-    `window.__tell({ t: 'record.begin', draftName: 'audio-generation', mode: 'workflow', count: 0 })`,
-  )
-  await page.waitForFunction(`document.getElementById('atelier-bar')`, { timeout: 4000 })
-  // Now pull the context out from under it, the way a reload does.
-  await page.evaluate(`
-    window.__errors = []
-    // Both: an invalidated context throws synchronously out of the listener,
-    // while a promise-form sendMessage rejects. Watching only for rejections
-    // reports a clean run for code that is throwing on every click.
-    window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason)))
-    window.addEventListener('error', (e) => window.__errors.push(String(e.message)))
-    window.__sent = []
-    window.chrome.runtime.id = undefined
-    window.chrome.runtime.sendMessage = () => { throw new Error('Extension context invalidated.') }
-  `)
-  return page
-}
 
-test('an orphaned recorder does not throw on every click', skip, async () => {
-  const page = await orphanedBar()
-  await page.evaluate(`document.getElementById('x').click()`)
-  await page.evaluate(`document.getElementById('x').click()`)
-  const errors = (await page.evaluate(`window.__errors`)) as string[]
-  assert.deepEqual(errors, [], 'a dead context is an expected state, not an exception per click')
-  await page.close()
-})
-
-test('an orphaned recorder takes its bar away instead of leaving a dead one', skip, async () => {
-  // The bar is the only thing telling the person a recording is in progress. If
-  // the recording is gone, leaving it on screen is a lie they act on.
-  const page = await orphanedBar()
-  await page.evaluate(`document.getElementById('x').click()`)
-  await page.waitForFunction(`!document.getElementById('atelier-bar')`, { timeout: 2000 })
-  await page.close()
-})
-
-test('pressing a control on an orphaned bar does not throw either', skip, async () => {
-  const page = await orphanedBar()
-  await page.evaluate(`document.querySelector('#atelier-bar [data-act="undo"]').click()`)
-  assert.deepEqual(await page.evaluate(`window.__errors`), [])
-  await page.close()
-})
-
-test('a live recorder still reports every action it hears', skip, async () => {
-  // The guard must not swallow the ordinary path: this is the bug the whole
-  // recorder exists to avoid.
-  const page = await barPage()
-  await page.evaluate(`document.body.insertAdjacentHTML('beforeend', '<button id="y">y</button>')`)
-  await page.evaluate(`document.getElementById('y').click()`)
-  await page.waitForFunction(`window.__actions().some((a) => a.kind === 'click')`, { timeout: 3000 })
-  await page.close()
-})
-
-/* ------------------------------------------ marking a field from the page */
+/** Where the launcher is, in viewport coordinates. */
+const launcherPoint = (page: any) =>
+  page.evaluate(`(() => {
+    const r = document.querySelector('#atelier-launcher').getBoundingClientRect()
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+  })()`)
 
 /**
- * Keeping a value is a decision made while typing it, in the page, with the bar
- * already on screen. Sending the person back to the popup to tick a box for a
- * field they are looking at is a worse version of the same question.
+ * Move the mouse the way a hand does.
+ *
+ * The check that notices being buried is throttled, because it runs on every
+ * pointermove and a person reaching for the launcher generates dozens of those.
+ * Two `mouse.move` calls back to back land inside one window and look, to the
+ * panel, like a single twitch — so this puts real time between them, which is
+ * what a hand crossing a screen actually does.
  */
-async function recordingPage() {
-  const page = await browser.newPage()
-  await page.setViewport({ width: 1000, height: 700 })
-  await page.setContent(
-    // Padded below the bar, which is fixed over the top of the window and would
-    // otherwise be what a click at these coordinates actually hits.
-    `<!doctype html><html><head><style>${OVERLAY_CSS}</style></head>
-     <body style="padding-top:140px">
-       <textarea id="sys"></textarea><textarea id="prompt"></textarea>
-     </body></html>`,
-  )
-  await page.evaluate(CHROME_STUB)
-  await page.evaluate(RECORDER)
-  await page.evaluate(
-    `window.__tell({ t: 'record.begin', draftName: 'audio-generation', mode: 'workflow', count: 0 })`,
-  )
-  await page.waitForFunction(`document.getElementById('atelier-bar')`, { timeout: 4000 })
-  return page
+async function reachFor(page: any, point: { x: number; y: number }) {
+  await page.mouse.move(point.x - 60, point.y - 60)
+  await new Promise((r) => setTimeout(r, 320))
+  await page.mouse.move(point.x - 20, point.y - 20)
+  await new Promise((r) => setTimeout(r, 320))
+  await page.mouse.move(point.x, point.y)
 }
 
-/** Type into a field the way a person does, so the recorder hears it. */
-async function typeInto(page: any, id: string, text: string) {
-  await page.click(`#${id}`)
-  await page.type(`#${id}`, text)
-  await page.evaluate(`document.getElementById('${id}').blur()`)
+/** Whether Atelier is the topmost thing at a point, which is the only question. */
+const onTopAt = (page: any, point: { x: number; y: number }) =>
+  page.evaluate(`(() => {
+    const hit = document.elementFromPoint(${point.x}, ${point.y})
+    return !!hit && !!hit.closest('#atelier-root')
+  })()`)
+
+test('the panel sits above a site overlay with the largest z-index there is', skip, async () => {
+  const page = await pageWith(
+    `<button id="go">Generate</button>
+     <div id="sheet" style="position:fixed;inset:0;z-index:2147483647;background:#000"></div>`,
+  )
+  await page.click('#atelier-root [data-act="collapse"]')
+  assert.equal(await onTopAt(page, (await launcherPoint(page)) as any), true)
+  await page.close()
+})
+
+test('and above a modal dialog, which no z-index can beat', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button><dialog id="sheet">Settings</dialog>`)
+  await page.click('#atelier-root [data-act="collapse"]')
+  // Opened *after* the panel, which is the hard direction: the top layer is a
+  // stack, and whatever entered it last is on top.
+  await page.evaluate(`document.querySelector('#sheet').showModal()`)
+
+  const point = (await launcherPoint(page)) as any
+  // The mouse moving is the signal that somebody is about to reach for it, and
+  // is what makes this self-healing rather than needing a click to fix.
+  await reachFor(page, point)
   await page.waitForFunction(
-    `window.__actions().some((a) => a.kind === 'type' && a.element.selectors.some((s) => s.value === '#${id}'))`,
+    `(() => { const h = document.elementFromPoint(${point.x}, ${point.y}); return !!h && !!h.closest('#atelier-root') })()`,
     { timeout: 4000 },
   )
-}
-
-/* -------------------------------------------------- the review, in the page */
-
-/**
- * Save opens a review in the page rather than committing silently.
- *
- * The recording was made here, looking at this. Sending someone to the
- * extension dropdown to check what was heard — and to see the value a step will
- * actually type — is asking them to verify the work somewhere other than where
- * they did it.
- */
-async function reviewPage() {
-  const page = await recordingPage()
-  await typeInto(page, 'sys', 'You are a careful assistant.')
-  await typeInto(page, 'prompt', 'a harbour at dusk')
-  // The worker stub answers record.list with whatever was recorded.
-  await page.evaluate(`
-    window.chrome.runtime.sendMessage = (msg, cb) => {
-      window.__sent.push(msg)
-      if (msg.t === 'record.list') {
-        cb && cb({ name: 'audio-generation', actions: window.__actions() })
-        return
-      }
-      cb && cb({ ok: true })
-    }
-  `)
-  await page.evaluate(`document.querySelector('#atelier-bar [data-act="save"]').click()`)
-  await page.waitForFunction(`document.getElementById('atelier-review')`, { timeout: 4000 })
-  return page
-}
-
-test('Save opens a review instead of committing straight away', skip, async () => {
-  const page = await reviewPage()
-  assert.equal(
-    await page.evaluate(`window.__sent.some((m) => m.t === 'record.saveFromPage')`),
-    false,
-    'nothing is saved until the review is confirmed',
-  )
   await page.close()
 })
 
-test('the review lists every step, in order', skip, async () => {
-  const page = await reviewPage()
-  const rows = (await page.evaluate(
-    `[...document.querySelectorAll('#atelier-review [data-step]')].length`,
-  )) as number
-  const actions = (await page.evaluate(`window.__actions().length`)) as number
-  assert.equal(rows, actions, 'every recorded action is accounted for')
-  await page.close()
-})
+test('and is still clickable under one, not merely visible', skip, async () => {
+  // A modal dialog makes the rest of the document inert. Being painted on top
+  // of one while being unable to receive a click is the worse failure of the
+  // two, because it looks fixed.
+  const page = await pageWith(`<button id="go">Generate</button><dialog id="sheet">Settings</dialog>`)
+  await page.click('#atelier-root [data-act="collapse"]')
+  await page.evaluate(`document.querySelector('#sheet').showModal()`)
 
-test('the review shows the value each field will actually type', skip, async () => {
-  // The whole point of a review: seeing the text, not a count of steps.
-  const page = await reviewPage()
-  const text = (await page.evaluate(`document.getElementById('atelier-review').textContent`)) as string
-  assert.match(text, /You are a careful assistant\./)
-  assert.match(text, /a harbour at dusk/)
-  await page.close()
-})
-
-test('a field the agent fills in is shown as a named value, not as its example', skip, async () => {
-  const page = await reviewPage()
-  const text = (await page.evaluate(`document.getElementById('atelier-review').textContent`)) as string
-  assert.match(text, /\{\{\s*\w+\s*\}\}|agent fills/i)
-  await page.close()
-})
-
-test('the review can keep a value, without going back to the page', skip, async () => {
-  const page = await reviewPage()
-  await page.evaluate(`
-    const box = document.querySelector('#atelier-review input[type="checkbox"]')
-    box.checked = true
-    box.dispatchEvent(new Event('change'))
-  `)
-  const sent = (await page.evaluate(
-    `window.__sent.filter((m) => m.t === 'record.role')`,
-  )) as any[]
-  assert.equal(sent.length, 1)
-  assert.equal(sent[0].role, 'fixed')
-  await page.close()
-})
-
-test('confirming the review is what saves it', skip, async () => {
-  const page = await reviewPage()
-  await page.evaluate(`document.querySelector('#atelier-review [data-act="confirm"]').click()`)
-  assert.equal(
-    await page.evaluate(`window.__sent.some((m) => m.t === 'record.saveFromPage')`),
-    true,
-  )
-  await page.waitForFunction(`!document.getElementById('atelier-review')`, { timeout: 2000 })
-  await page.close()
-})
-
-test('backing out of the review leaves the recording running', skip, async () => {
-  const page = await reviewPage()
-  await page.evaluate(`document.querySelector('#atelier-review [data-act="back"]').click()`)
-  await page.waitForFunction(`!document.getElementById('atelier-review')`, { timeout: 2000 })
-  assert.equal(await page.evaluate(`!!document.getElementById('atelier-bar')`), true, 'the bar comes back')
-  assert.equal(
-    await page.evaluate(`window.__sent.some((m) => m.t === 'record.saveFromPage')`),
-    false,
-  )
-  await page.close()
-})
-
-test('the review is big enough to read, and centred', skip, async () => {
-  const page = await reviewPage()
-  const box = (await page.evaluate(`
-    (() => {
-      const r = document.querySelector('#atelier-review .atelier-review-card').getBoundingClientRect()
-      return { width: r.width, left: r.left, right: window.innerWidth - r.right }
-    })()
-  `)) as any
-  assert.ok(box.width > 520, `the card is only ${Math.round(box.width)}px wide`)
-  assert.ok(Math.abs(box.left - box.right) < 2, 'centred')
-  await page.close()
-})
-
-/* ----------------------------------------- one field, one step, at record time */
-
-/**
- * Typing is debounced per field, but any pause longer than the debounce emits a
- * second action — so a sentence typed with a thought in the middle of it arrived
- * as two steps, three if you went back to fix a word.
- *
- * `propose.ts` has always collapsed those, but only when the recording was
- * turned into a workflow. Everything a person looks at before that — the count
- * on the bar, the popup's list, the review — showed the raw bursts. Collapsing
- * in the worker makes the stored recording the thing it claims to be.
- */
-const typedOn = (label: string, id: string, value: string, extra: Record<string, unknown> = {}) => ({
-  kind: 'type',
-  element: { tag: 'textarea', label, selectors: [{ strategy: 'id', value: id, score: 92 }] },
-  value,
-  ...extra,
-})
-
-async function workerRecording() {
-  const page = await workerWith([])
-  const add = async (action: unknown) =>
-    (await page.evaluate(`window.__ask({ t: 'record.action', action: ${JSON.stringify(action)} })`)) as any
-  return { page, add }
-}
-
-const stored = (page: any) =>
-  page.evaluate(`window.__sessionStore['atelier:recording'].actions`)
-
-test('two bursts of typing into one field are one step, with the finished text', skip, async () => {
-  const { page, add } = await workerRecording()
-  await add(typedOn('Prompt', '#prompt', 'a harbour'))
-  await add(typedOn('Prompt', '#prompt', 'a harbour at dusk'))
-  const actions = (await stored(page)) as any[]
-  assert.equal(actions.length, 1)
-  assert.equal(actions[0].value, 'a harbour at dusk', 'the last value is the complete one')
-  await page.close()
-})
-
-test('the count stops climbing while you are still typing the same thing', skip, async () => {
-  // The count is the only thing on the bar telling you the recorder is hearing
-  // you. It should mean steps, not keystroke bursts.
-  const { page, add } = await workerRecording()
-  const first = await add(typedOn('Prompt', '#prompt', 'a'))
-  const second = await add(typedOn('Prompt', '#prompt', 'a harbour at dusk'))
-  assert.equal(first.count, 1)
-  assert.equal(second.count, 1)
-  await page.close()
-})
-
-test('going back to a field after doing something else stays two steps', skip, async () => {
-  // Order is what replay follows. Typing, clicking, then typing into the same
-  // field again is three things that happened, in that order.
-  const { page, add } = await workerRecording()
-  await add(typedOn('Prompt', '#prompt', 'a harbour'))
-  await add({ kind: 'click', element: { tag: 'button', label: 'Run', selectors: [{ strategy: 'id', value: '#run', score: 92 }] } })
-  await add(typedOn('Prompt', '#prompt', 'a harbour at dusk'))
-  assert.equal(((await stored(page)) as any[]).length, 3)
-  await page.close()
-})
-
-test('two different fields are two steps, however fast they follow each other', skip, async () => {
-  const { page, add } = await workerRecording()
-  await add(typedOn('Instructions', '#sys', 'setup'))
-  await add(typedOn('Prompt', '#prompt', 'a harbour at dusk'))
-  assert.equal(((await stored(page)) as any[]).length, 2)
-  await page.close()
-})
-
-test('a kept value stays kept when you go back and fix a typo in it', skip, async () => {
-  const { page, add } = await workerRecording()
-  await add(typedOn('Instructions', '#sys', 'You are a carful assistant', { role: 'fixed' }))
-  await add(typedOn('Instructions', '#sys', 'You are a careful assistant'))
-  const actions = (await stored(page)) as any[]
-  assert.equal(actions.length, 1)
-  assert.equal(actions[0].role, 'fixed', 'the mark is on the field, not on one burst of typing')
-  assert.equal(actions[0].value, 'You are a careful assistant')
-  await page.close()
-})
-
-test('a password burst is never merged into a recorded value', skip, async () => {
-  const { page, add } = await workerRecording()
-  await add(typedOn('Password', '#pw', null as unknown as string, { secret: true }))
-  await add(typedOn('Password', '#pw', null as unknown as string, { secret: true }))
-  const actions = (await stored(page)) as any[]
-  assert.equal(actions.length, 1)
-  assert.equal(actions[0].value, null, 'nothing about a password is written down, merged or not')
-  await page.close()
-})
-
-test('clicking into a field and then typing stays two steps', skip, async () => {
-  // The ordinary way anyone fills in a form, and the case where a merge rule
-  // keyed only on the element would swallow the click that focuses the field.
-  const { page, add } = await workerRecording()
-  const field = { tag: 'textarea', label: 'Prompt', selectors: [{ strategy: 'id', value: '#prompt', score: 92 }] }
-  await add({ kind: 'click', element: field })
-  await add({ kind: 'type', element: field, value: 'a harbour at dusk' })
-  const actions = (await stored(page)) as any[]
-  assert.deepEqual(
-    actions.map((a) => a.kind),
-    ['click', 'type'],
-    'a merge is between two bursts of typing, not between anything on the same element',
-  )
-  await page.close()
-})
-
-/* ------------------------------------------- Enter inside a field is text */
-
-/**
- * Enter in a textarea is a newline. Recording it as a step is wrong twice over:
- * it is not an action to replay — the typed value already contains the newline —
- * and it lands *between* two bursts of typing, which is what stopped them
- * merging. A multi-line value, which is exactly what a long setup field is,
- * therefore arrived as three steps however well the merge worked.
- */
-async function typingPage(html: string) {
-  const page = await browser.newPage()
-  await page.setViewport({ width: 1000, height: 700 })
-  await page.setContent(
-    `<!doctype html><html><head><style>${OVERLAY_CSS}</style></head>
-     <body style="padding-top:140px">${html}</body></html>`,
-  )
-  await page.evaluate(CHROME_STUB)
-  await page.evaluate(RECORDER)
-  await page.evaluate(`window.__tell({ t: 'record.begin', draftName: 't', mode: 'workflow', count: 0 })`)
-  await page.waitForFunction(`document.getElementById('atelier-bar')`, { timeout: 4000 })
-  return page
-}
-
-const kinds = (page: any) => page.evaluate(`window.__actions().map((a) => a.kind)`)
-
-test('Enter inside a textarea is not a step — it is part of what was typed', skip, async () => {
-  const page = await typingPage(`<textarea id="sys"></textarea>`)
-  await page.click('#sys')
-  await page.type('#sys', 'You are careful.')
-  await page.keyboard.press('Enter')
-  await page.type('#sys', 'Answer plainly.')
-  await page.evaluate(`document.getElementById('sys').blur()`)
-  // Typing is debounced at 600ms, so the step does not exist before then.
-  await page.waitForFunction(`window.__actions().some((a) => a.kind === 'type')`, { timeout: 4000 })
-  assert.equal(
-    ((await kinds(page)) as string[]).includes('key'),
-    false,
-    'a newline is text, not a keystroke to replay',
-  )
-  const typed = (await page.evaluate(
-    `window.__actions().filter((a) => a.kind === 'type').map((a) => a.value)`,
-  )) as string[]
-  assert.match(typed[typed.length - 1]!, /You are careful\.[\s\S]*Answer plainly\./)
-  await page.close()
-})
-
-test('Enter in a single-line input is still a step, because it submits', skip, async () => {
-  const page = await typingPage(`<input id="q">`)
-  await page.click('#q')
-  await page.type('#q', 'a harbour')
-  await page.keyboard.press('Enter')
-  await page.waitForFunction(`window.__actions().some((a) => a.kind === 'key')`, { timeout: 3000 })
-  await page.close()
-})
-
-test('Enter outside any field is still a step', skip, async () => {
-  const page = await typingPage(`<button id="go">Go</button>`)
-  await page.click('#go')
-  await page.keyboard.press('Enter')
-  await page.waitForFunction(`window.__actions().some((a) => a.kind === 'key')`, { timeout: 3000 })
-  await page.close()
-})
-
-test('Enter in a contenteditable is not a step either', skip, async () => {
-  const page = await typingPage(`<div id="ed" contenteditable="true"></div>`)
-  await page.click('#ed')
-  await page.type('#ed', 'first line')
-  await page.keyboard.press('Enter')
-  await page.type('#ed', 'second line')
-  await page.waitForFunction(`window.__actions().some((a) => a.kind === 'type')`, { timeout: 4000 })
-  assert.equal(((await kinds(page)) as string[]).includes('key'), false)
-  await page.close()
-})
-
-test('Tab is still recorded — it moves to the next field', skip, async () => {
-  const page = await typingPage(`<textarea id="sys"></textarea><input id="q">`)
-  await page.click('#sys')
-  await page.type('#sys', 'setup')
-  await page.keyboard.press('Tab')
-  await page.waitForFunction(
-    `window.__actions().some((a) => a.kind === 'key' && a.value === 'Tab')`,
-    { timeout: 3000 },
-  )
-  await page.close()
-})
-
-test('a long multi-line value typed with pauses ends up as one step', skip, async () => {
-  // The whole complaint, end to end: the real recorder feeding the real merge
-  // rule. Newlines and pauses longer than the 600ms debounce both split the
-  // typing; neither should reach the recording as a step of its own.
-  const page = await typingPage(`<textarea id="sys"></textarea>`)
-  await page.evaluate(`
-    // The worker's rule, applied here so this exercises the recorder's output
-    // rather than a hand-written action list.
-    window.__recording = []
-    const key = (el) => {
-      const best = [...(el?.selectors ?? [])].sort((a, b) => b.score - a.score)[0]
-      return best ? best.strategy + ':' + best.value : null
-    }
-    window.chrome.runtime.sendMessage = (msg, cb) => {
-      window.__sent.push(msg)
-      if (msg.t === 'record.action') {
-        const a = msg.action
-        const prev = window.__recording[window.__recording.length - 1]
-        const merges = prev && prev.kind === 'type' && a.kind === 'type' &&
-          prev.secret === a.secret && key(a.element) && key(a.element) === key(prev.element)
-        if (merges) window.__recording[window.__recording.length - 1] = a
-        else window.__recording.push(a)
-      }
-      cb && cb({ ok: true, count: window.__recording.length })
-    }
-  `)
-
-  await page.click('#sys')
-  await page.type('#sys', 'You are a careful assistant.')
-  await page.keyboard.press('Enter')
-  await new Promise((r) => setTimeout(r, 800)) // longer than the debounce
-  await page.type('#sys', 'Answer in plain language.')
-  await page.evaluate(`document.getElementById('sys').blur()`)
-  await new Promise((r) => setTimeout(r, 900))
-
-  const recording = (await page.evaluate(`window.__recording`)) as any[]
-  const typed = recording.filter((a) => a.kind === 'type')
-  assert.equal(typed.length, 1, `expected one typing step, got ${recording.map((a) => a.kind).join(', ')}`)
-  assert.match(typed[0].value, /You are a careful assistant\.[\s\S]*Answer in plain language\./)
-  assert.equal(
-    recording.some((a) => a.kind === 'key'),
-    false,
-    'and no stray keystroke steps between them',
-  )
-  await page.close()
-})
-
-/* ---------------------------------------------------------- moving the bar */
-
-/**
- * The bar sits over the page being recorded, which means it sits over something
- * the person needs to click. Being able to move it is the fix; being unable to
- * lose it off an edge is what makes moving it safe.
- */
-const barBox = (page: any) =>
-  page.evaluate(`
-    (() => {
-      const r = document.getElementById('atelier-bar').getBoundingClientRect()
-      return { left: r.left, top: r.top, width: r.width, height: r.height,
-               vw: window.innerWidth, vh: window.innerHeight }
-    })()
-  `)
-
-/** A drag, as a sequence of pointer events on the bar's own background. */
-async function dragBar(page: any, toX: number, toY: number, from = '.atelier-name') {
-  await page.evaluate(
-    `(() => {
-      const bar = document.getElementById('atelier-bar')
-      const grip = bar.querySelector('${from}') || bar
-      const r = grip.getBoundingClientRect()
-      const at = (type, x, y) => grip.dispatchEvent(
-        new PointerEvent(type, { clientX: x, clientY: y, bubbles: true, cancelable: true, pointerId: 1 }),
-      )
-      at('pointerdown', r.left + 4, r.top + 4)
-      window.dispatchEvent(new PointerEvent('pointermove', { clientX: ${toX}, clientY: ${toY}, bubbles: true, pointerId: 1 }))
-      window.dispatchEvent(new PointerEvent('pointerup', { clientX: ${toX}, clientY: ${toY}, bubbles: true, pointerId: 1 }))
-    })()`,
-  )
-}
-
-test('the bar can be dragged somewhere else', skip, async () => {
-  const page = await barPage()
-  const before = (await barBox(page)) as any
-  await dragBar(page, 200, 400)
-  const after = (await barBox(page)) as any
-  assert.ok(Math.abs(after.top - before.top) > 100, 'it should have moved')
-  await page.close()
-})
-
-test('it cannot be dragged off the top or the left', skip, async () => {
-  const page = await barPage()
-  await dragBar(page, -900, -900)
-  const box = (await barBox(page)) as any
-  assert.ok(box.left >= 0, `left is ${Math.round(box.left)}`)
-  assert.ok(box.top >= 0, `top is ${Math.round(box.top)}`)
-  await page.close()
-})
-
-test('it cannot be dragged off the bottom or the right', skip, async () => {
-  const page = await barPage()
-  await dragBar(page, 9000, 9000)
-  const box = (await barBox(page)) as any
-  assert.ok(box.left + box.width <= box.vw, 'the right edge stays on screen')
-  assert.ok(box.top + box.height <= box.vh, 'the bottom edge stays on screen')
-  await page.close()
-})
-
-test('shrinking the window brings the bar back inside it', skip, async () => {
-  // Dragged to the far corner, then the window gets smaller — the bar would
-  // otherwise be sitting outside a viewport it used to fit in.
-  const page = await barPage(1200)
-  await dragBar(page, 9000, 9000)
-  await page.setViewport({ width: 700, height: 420 })
-  await page.evaluate(`window.dispatchEvent(new Event('resize'))`)
-  await new Promise((r) => setTimeout(r, 120))
-  const box = (await barBox(page)) as any
-  assert.ok(box.left + box.width <= box.vw + 1, 'still inside after the resize')
-  assert.ok(box.top + box.height <= box.vh + 1, 'still inside after the resize')
-  await page.close()
-})
-
-test('dragging from a control does not move the bar, so the controls still work', skip, async () => {
-  const page = await barPage()
-  const before = (await barBox(page)) as any
-  await dragBar(page, 200, 500, '[data-act="undo"]')
-  const after = (await barBox(page)) as any
-  assert.equal(Math.round(after.top), Math.round(before.top))
-  assert.equal(Math.round(after.left), Math.round(before.left))
-  await page.close()
-})
-
-/**
- * A page on a real origin.
- *
- * `setContent` leaves the page on about:blank, whose origin is opaque — every
- * `sessionStorage` access there throws SecurityError. The recorder survives that
- * by design, which is why the rest of this suite never noticed; a test about
- * remembering something has to be somewhere that can remember.
- */
-async function barPageOnOrigin() {
-  const page = await browser.newPage()
-  await page.setViewport({ width: 1000, height: 700 })
-  await page.setRequestInterception(true)
-  page.on('request', (req: any) => {
-    if (req.url().startsWith('http://atelier.test/')) {
-      req.respond({
-        contentType: 'text/html',
-        body: `<!doctype html><html><head><style>${OVERLAY_CSS}</style></head><body></body></html>`,
-      })
-    } else {
-      req.continue()
-    }
+  const point = (await launcherPoint(page)) as any
+  await reachFor(page, point)
+  await page.mouse.click(point.x, point.y)
+  await page.waitForFunction(`document.querySelector('#atelier-panel').hidden === false`, {
+    timeout: 4000,
   })
-  await page.goto('http://atelier.test/', { waitUntil: 'domcontentloaded' })
-  await page.evaluate(CHROME_STUB)
-  await page.evaluate(RECORDER)
-  await page.evaluate(
-    `window.__tell({ t: 'record.begin', draftName: 'audio-generation', mode: 'workflow', count: 0 })`,
+  await page.close()
+})
+
+test('the open panel comes back too, not just the launcher', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button><dialog id="sheet">Settings</dialog>`)
+  await page.evaluate(`document.querySelector('#sheet').showModal()`)
+  const point = (await page.evaluate(`(() => {
+    const r = document.querySelector('#atelier-panel').getBoundingClientRect()
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 10) }
+  })()`)) as any
+  await reachFor(page, point)
+  await page.waitForFunction(
+    `(() => { const h = document.elementFromPoint(${point.x}, ${point.y}); return !!h && !!h.closest('#atelier-root') })()`,
+    { timeout: 4000 },
   )
-  await page.waitForFunction(`document.getElementById('atelier-bar')`, { timeout: 4000 })
-  return page
+  await page.close()
+})
+
+test('re-entering the top layer does not take the caret out of what is being typed', skip, async () => {
+  // Leaving the top layer and going back into it runs the popover focus fixup,
+  // which hands focus back to whatever had it before — mid-sentence, if the
+  // person is typing a prompt into the composer.
+  const page = await pageWith(`<input id="p" placeholder="Prompt">`)
+  await pointAt(page, '#p')
+  await page.evaluate(`(() => {
+    const area = document.querySelector('#atelier-root .at-area')
+    area.focus()
+    area.value = 'a rope bridge'
+    area.setSelectionRange(4, 4)
+  })()`)
+  await page.evaluate(`document.querySelector('#atelier-root').__atelierRaise()`)
+  const state = (await page.evaluate(`(() => {
+    const area = document.querySelector('#atelier-root .at-area')
+    return { focused: document.activeElement === area, at: area.selectionStart }
+  })()`)) as any
+  assert.equal(state.focused, true, 'still typing into the same field')
+  assert.equal(state.at, 4, 'and at the same place in it')
+  await page.close()
+})
+
+/* --------------------------------------------------- one name, one value */
+
+/**
+ * Two fields cannot ask the agent for the same thing.
+ *
+ * The caller passes one value per name, so two dynamic fields sharing a name
+ * would both receive it — which is silently not what anybody who drew two
+ * boxes meant. The comparison is on what the name *becomes*: "Same text",
+ * "SAME Text" and "same_text" are one name.
+ */
+
+/** Add a typed step the agent supplies, named by what the field is called. */
+async function addDynamic(page: any, selector: string, name: string) {
+  await pointAt(page, selector)
+  await page.evaluate(`(() => {
+    const input = document.querySelector('#atelier-root .at-card .at-input')
+    input.value = ${JSON.stringify(name)}
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    const area = document.querySelector('#atelier-root .at-area')
+    area.value = 'something'
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await page.click('#atelier-root [data-mode="dynamic"]')
+  await page.waitForSelector('#atelier-root .at-sub-field')
+  await page.click('#atelier-root [data-act="add"]')
 }
 
-test('where you put it survives the bar being rebuilt', skip, async () => {
-  // A navigation destroys the content script and the bar is injected again. A
-  // bar that jumps back to the middle every time the page moves has not really
-  // been moved.
-  const page = await barPageOnOrigin()
-  await dragBar(page, 120, 380)
-  const moved = (await barBox(page)) as any
-  await page.evaluate(`window.__tell({ t: 'record.end' })`)
-  await page.evaluate(`window.__tell({ t: 'record.begin', draftName: 'audio-generation', mode: 'workflow', count: 3 })`)
-  await page.waitForFunction(`document.getElementById('atelier-bar')`, { timeout: 3000 })
-  const again = (await barBox(page)) as any
-  assert.equal(Math.round(again.top), Math.round(moved.top))
-  assert.equal(Math.round(again.left), Math.round(moved.left))
+test('a second field cannot ask for a name the first already asks for', skip, async () => {
+  const page = await pageWith(`<input id="a" placeholder="A"><input id="b" placeholder="B">`)
+  await addDynamic(page, '#a', 'Same text')
+  await page.waitForFunction(`window.__steps().length === 1`)
+
+  await addDynamic(page, '#b', 'SAME Text')
+  await page.waitForSelector('#atelier-root .at-error')
+  const said = await page.evaluate(`document.querySelector('#atelier-root .at-error').textContent`)
+  assert.match(said as string, /already asks the agent for/i)
+  assert.match(said as string, /same_text/)
+
+  assert.equal(await page.evaluate(`window.__steps().length`), 1, 'the step was not kept')
+  // And the action was never performed, so the page did not move on for a step
+  // that is being refused.
+  assert.equal(await page.evaluate(`document.querySelector('#b').value`), '')
+  await page.close()
+})
+
+test('the underscored spelling is the same name too', skip, async () => {
+  const page = await pageWith(`<input id="a" placeholder="A"><input id="b" placeholder="B">`)
+  await addDynamic(page, '#a', 'Same text')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  await addDynamic(page, '#b', 'same_text')
+  await page.waitForSelector('#atelier-root .at-error')
+  assert.equal(await page.evaluate(`window.__steps().length`), 1)
+  await page.close()
+})
+
+test('a different name is fine, and so is the same words on a kept value', skip, async () => {
+  const page = await pageWith(
+    `<input id="a" placeholder="A"><input id="b" placeholder="B"><input id="c" placeholder="C">`,
+  )
+  await addDynamic(page, '#a', 'Prompt')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  await addDynamic(page, '#b', 'Negative prompt')
+  await page.waitForFunction(`window.__steps().length === 2`)
+
+  // Static values are setup, not inputs — nothing asks for them, so there is
+  // nothing for them to collide with.
+  await pointAt(page, '#c')
+  await page.evaluate(`(() => {
+    const input = document.querySelector('#atelier-root .at-card .at-input')
+    input.value = 'Prompt'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })()`)
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 3`)
+  await page.close()
+})
+
+test('a recorded value can be renamed onto a free name, but not onto a taken one', skip, async () => {
+  const page = await pageWith(`<input id="a" placeholder="A"><input id="b" placeholder="B">`)
+  await addDynamic(page, '#a', 'Prompt')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  await addDynamic(page, '#b', 'Subject')
+  await page.waitForFunction(`window.__steps().length === 2`)
+
+  // By step rather than by position: the pipeline reads newest-first, and a step
+  // whose editor is open shows no Change this value button at all.
+  await page.click('#atelier-root .at-step [data-edit="1"]')
+  await page.waitForSelector('#atelier-root .at-edit [data-role="edit-name"]')
+
+  const rename = async (name: string) => {
+    await page.evaluate(
+      `document.querySelector('#atelier-root .at-edit [data-role="edit-name"]').value = ${JSON.stringify(name)}`,
+    )
+    await page.click('#atelier-root .at-edit [data-save-edit]')
+  }
+
+  await rename('PROMPT')
+  await page.waitForSelector('#atelier-root .at-edit .at-error')
+  assert.equal(await page.evaluate(`window.__steps()[1].inputName`), 'subject', 'unchanged')
+  // Refused, and left open on the thing being refused, so the name can just be
+  // corrected rather than found again.
+  assert.equal(await page.evaluate(`!!document.querySelector('#atelier-root .at-edit')`), true)
+
+  await rename('Main subject')
+  await page.waitForFunction(`window.__steps()[1].inputName === 'main_subject'`)
   await page.close()
 })

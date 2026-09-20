@@ -27,6 +27,8 @@ export type StepKind =
   | 'click'
   | 'type'
   | 'select'
+  | 'check'
+  | 'uncheck'
   | 'upload'
   | 'key'
   | 'scroll'
@@ -41,15 +43,51 @@ export type WaitCondition =
   | { kind: 'networkIdle'; idleMs: number }
   | { kind: 'delay'; ms: number }
 
+/**
+ * Where a capture reads its result from.
+ *
+ * `auto` is the media path — the element's own source, or the first thing
+ * inside it that has one. The rest name a specific property, because "capture
+ * what this field currently holds" and "capture what it is prompting for" are
+ * different questions and only the person recording knows which they meant.
+ */
+export type CaptureFrom = 'auto' | 'text' | 'value' | 'placeholder'
+
+/**
+ * Whether a value is supplied by the caller or replayed exactly.
+ *
+ * `dynamic` becomes a named input the agent fills in; `static` is setup the
+ * agent never sees, and is deliberately not reported by any MCP tool. Both keep
+ * `sampleValue`, because a test run has to have something to type.
+ */
+export type ValueMode = 'static' | 'dynamic'
+
 export interface Step {
   id: string
   kind: StepKind
   /** Empty for navigate/wait/key. */
   selectors: SelectorCandidate[]
-  /** For type/select/navigate. May contain {{input}} placeholders. */
+  /**
+   * What the person recording called this element, confirmed by them at the
+   * moment they pointed at it. It is the step's human name *and* the first
+   * selector candidate, which is why a workflow reads like a sentence rather
+   * than like a CSS path.
+   */
+  target?: string
+  /** For type/select/navigate/key. May contain a {{input}} placeholder. */
   value?: string
+  /** type/select only. Absent means the value is whatever `value` says. */
+  valueMode?: ValueMode
+  /**
+   * The text actually typed while recording, kept whether the value is static
+   * or dynamic. A dynamic step stores it so a test run has something to type
+   * without anyone inventing a plausible-looking string.
+   */
+  sampleValue?: string
+  /** For a dynamic value: the input name the caller passes it under. */
+  inputName?: string
   /** For capture: what kind of artifact, so the extension knows how to extract it. */
-  capture?: { as: 'image' | 'text' | 'download'; attribute?: string }
+  capture?: { as: 'image' | 'text' | 'download'; attribute?: string; from?: CaptureFrom }
   /** Checked before the step runs. */
   waitBefore?: WaitCondition
   /** Checked after — this is what turns "click generate" into "click and wait for the image". */
@@ -101,6 +139,9 @@ export interface Job {
   blockedReason: string | null
   error: string | null
   assetIds: string[]
+  /** A run started from the dashboard or the popup to check a workflow still
+   *  works, using the values recorded with it rather than the caller's. */
+  isTest: boolean
   createdAt: string
   updatedAt: string
 }

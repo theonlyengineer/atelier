@@ -17,7 +17,6 @@ export const ASSETS_DIR = join(HOME, 'assets')
 export const RUN_DIR = join(HOME, 'run')
 export const IPC_SOCKET = join(RUN_DIR, 'atelierd.sock')
 export const PORT_FILE = join(RUN_DIR, 'port')
-export const TOKEN_FILE = join(RUN_DIR, 'token')
 export const LOG_FILE = join(HOME, 'atelierd.log')
 
 /** Default HTTP/WS port. Overridable because 7717 could be taken. */

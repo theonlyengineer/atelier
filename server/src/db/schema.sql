@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS project (
   name       TEXT NOT NULL,
   slug       TEXT NOT NULL UNIQUE,
   note       TEXT,
+  -- The bearer token an agent presents on /mcp. Per project rather than per
+  -- daemon: the token is what says where a session is working, so handing one
+  -- out is the whole of "connect this repo to this project" and nothing has to
+  -- be chosen afterwards. Generated on creation; never blank.
+  token      TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 
@@ -60,6 +65,10 @@ CREATE TABLE IF NOT EXISTS job (
   step_count     INTEGER NOT NULL DEFAULT 0,
   blocked_reason TEXT,
   error          TEXT,
+  -- A run started from the dashboard or the popup to check a workflow still
+  -- works. It uses the values recorded with the workflow rather than a
+  -- caller's, so it is worth telling apart in the history.
+  is_test        INTEGER NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL
 );

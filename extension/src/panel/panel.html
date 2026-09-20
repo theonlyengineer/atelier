@@ -8,7 +8,7 @@
   </head>
   <body>
     <!-- Offline is the one piece of chrome that is always allowed to shout,
-         because nothing else in the panel means anything when it is true. It
+         because nothing else in the popup means anything when it is true. It
          retries on its own, so the copy says what is happening rather than
          handing out an instruction that is usually wrong. -->
     <div id="offline" class="banner" hidden>
@@ -28,97 +28,46 @@
       <ul id="running" class="cards"></ul>
     </section>
 
-    <!-- Recorded, turned into a workflow, and waiting to be allowed to run.
-         Above everything else because it is one click from being useful, and
-         because a proposal nobody sees is a recording nobody made. -->
-    <section id="pending-section" hidden>
-      <h2 class="label label-go">Ready to activate</h2>
-      <ul id="pending" class="cards"></ul>
-    </section>
+    <!--
+      The workflows recorded on the site you are looking at.
 
-    <!-- Live during a recording. A count alone cannot tell you the recorder
-         heard the wrong thing; a list can. -->
-    <section id="capture-section" hidden>
-      <h2 class="label label-rec">Recording</h2>
-      <p id="capture-lede" class="hint" hidden>
-        Anything you type becomes a value the agent fills in when it runs. When
-        you hit <strong>Save recording</strong>, you will see every step with the
-        text it will type, and can keep any value as it stands.
-      </p>
-      <ol id="capture-list" class="steps"></ol>
-      <p id="capture-empty" class="hint">
-        Nothing captured yet. Do the task once. When you reach the point where
-        the result appears, hit <strong>Capture result</strong> in the bar at the
-        top of the page and click where it will be — it does not have to be there
-        yet.
-      </p>
-      <div class="actions">
-        <button id="capture-save" class="primary">Save recording</button>
-        <button id="capture-undo" class="ghost">Undo last</button>
-        <button id="capture-discard" class="ghost">Discard</button>
-      </div>
+      The popup is the surface you reach for *while on a page*, so it shows what
+      that page can do and nothing else. Everything a project holds is a
+      dashboard question, and the line below says how much of it there is so the
+      filtering is visible rather than mysterious.
+    -->
+    <section id="here-section">
+      <h2 class="label"><span id="here-label">On this page</span></h2>
+      <ul id="here" class="list"></ul>
+      <p id="here-empty" class="hint" hidden></p>
     </section>
-
-    <!-- Which project a recording lands in. The panel does not switch it — the
-         dashboard does — but it must say, or a recording can be filed somewhere
-         nobody is looking without anything on screen having hinted at it. -->
-    <p id="project-line" class="hint project-line" hidden></p>
 
     <section id="record-section">
       <button id="record" class="record">
         <span class="record-dot"></span>
         <span id="record-label">Record a workflow</span>
       </button>
-      <p id="record-done" class="hint done" hidden></p>
+      <p id="record-live" class="hint" hidden></p>
     </section>
 
-    <!-- The first screen a new user sees. It used to say "Nothing recorded
-         yet." and stop, which is a dead end at exactly the moment the product
-         has to teach itself. -->
-    <section id="first-run" hidden>
-      <h2 class="label">Getting started</h2>
-      <ol class="guide">
-        <li><strong>Open the page</strong> you want to automate, and sign in if it needs it.</li>
-        <li><strong>Record a workflow</strong>, and give it a short name.</li>
-        <li><strong>Do the task once.</strong> Every click and every field is captured.</li>
-        <li>
-          <strong>Point at the result</strong> with <em>Capture result</em> — before it
-          exists is fine, Atelier waits for it.
-        </li>
-        <li><strong>Save.</strong> Atelier writes the workflow; you confirm it here.</li>
-      </ol>
-      <p class="hint">
-        Atelier only ever gets access to sites you record on, and never records a
-        password.
-      </p>
-    </section>
-
-    <!-- Everything below is reference, not action. -->
-    <details id="workflows-details" open>
-      <summary>
-        <span>Workflows</span>
-        <span id="workflow-count" class="count">0</span>
-      </summary>
-      <ul id="workflows" class="list"></ul>
-    </details>
-
-    <p class="hint">
-      <a id="dashboard-link" href="#" target="_blank" rel="noopener">Open the dashboard ↗</a>
+    <p class="foot">
+      <span id="elsewhere" class="muted"></span>
+      <a id="dashboard-link" href="#" target="_blank" rel="noopener">Dashboard ↗</a>
     </p>
 
-    <p id="stamp" class="stamp"></p>
-
-    <dialog id="name-dialog">
-      <form method="dialog">
-        <h3>Name this workflow</h3>
-        <p class="hint">Your agent calls it by this name. Short and kebab-case.</p>
-        <input id="name-input" name="name" placeholder="export-invoices" autocomplete="off" />
-        <menu>
-          <button value="cancel" class="ghost">Cancel</button>
-          <button id="name-go" value="ok" class="primary">Start recording</button>
-        </menu>
-      </form>
-    </dialog>
+    <!-- Atelier's own dialog. The browser's confirm() is modal to the whole
+         window and cannot be styled, and a popup that raises one is a popup
+         that has already lost focus — which closes it. -->
+    <div id="modal" class="modal" hidden>
+      <div class="modal-card">
+        <h3 id="modal-title"></h3>
+        <p id="modal-body" class="hint"></p>
+        <div class="actions">
+          <button id="modal-go" class="primary"></button>
+          <button id="modal-stop" class="ghost">Cancel</button>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="panel.js"></script>
   </body>

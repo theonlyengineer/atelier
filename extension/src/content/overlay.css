@@ -1,51 +1,152 @@
-/* The recording bar. Deliberately loud — it is a mode, and a mode you can forget
-   you are in is a bug. */
-#atelier-bar {
-  position: fixed !important;
-  z-index: 2147483647 !important;
-  top: 12px !important;
+/*
+ * The control panel, drawn over a page whose stylesheet we have never seen.
+ *
+ * Everything here is !important and every value is stated. That is not
+ * defensiveness for its own sake: this markup is injected into documents that
+ * reset margins globally, set `* { box-sizing }`, restyle every button, and
+ * occasionally declare `div { display: table }`. A panel that inherits a page's
+ * line-height is a panel nobody can read, and one that inherits its positioning
+ * is one nobody can find.
+ *
+ * `[hidden] { display: none !important }` is load-bearing and appears twice in
+ * this project for the same reason. The `hidden` attribute is implemented by
+ * the UA rule `[hidden] { display: none }`, which any author rule setting
+ * `display` outranks — a `.panel { display: flex }` kept the panel permanently
+ * on screen no matter what the JavaScript set, and cost most of a session.
+ */
+
+#atelier-root {
+  --at-accent: #ff6552;
+  --at-accent-deep: #e5482f;
+  --at-page: #14120f;
+  --at-panel: #1c1916;
+  --at-sunk: #241f1b;
+  --at-ink: #f7f2ea;
+  --at-dim: rgb(247 242 234 / 72%);
+  --at-faint: rgb(247 242 234 / 46%);
+  --at-line: rgb(247 242 234 / 14%);
+  --at-ok: #6bc992;
+  --at-bad: #ff6552;
+
+  all: initial !important;
+  font: 400 13px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif !important;
+  color: var(--at-ink) !important;
+
   /*
-   * Centred with a transform, sized with max-content, and both marked
-   * !important — this element is injected into pages whose CSS we do not
-   * control and cannot audit.
+   * The root is a popover, and everything Atelier draws hangs off it, so that
+   * all of it lives in the **top layer**.
    *
-   * The original bug was never the transform. A fixed element with `left` and no
-   * width is shrink-to-fit inside the space remaining to its right — half the
-   * viewport — so the bar was laid out in 50vw however wide the window was and
-   * the buttons wrapped inside their own pills. `width: max-content` is the fix:
-   * it sizes to the content rather than to the space available.
+   * This is the only thing that works. A site's own dialog opened with
+   * showModal(), or anything shown with the popover API, paints in the top
+   * layer — above every z-index there is. 2147483647 is the largest integer CSS
+   * will accept and it loses to the top layer every time, so a panel that
+   * merely had the biggest number went under any site sheet that used a real
+   * modal. Being in the top layer too is not an escalation of the same trick;
+   * it is the different trick that beats it.
    *
-   * Centring with `inset: 0` and auto margins also works, right up to the very
-   * common `* { margin: 0 !important }`, which silently pins the bar to the left
-   * edge. A transform depends on nothing the page can reset by accident.
+   * The UA gives a popover `position: fixed; inset: 0; margin: auto` and a
+   * border, a background and a scroller. `all: initial` above has already
+   * flattened most of that, and what follows states the rest: a box of no size
+   * at the origin, which paints its children — each fixed and positioned on its
+   * own — and intercepts no clicks of its own.
    */
-  left: 50% !important;
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
   right: auto !important;
-  transform: translateX(-50%) !important;
+  bottom: auto !important;
   margin: 0 !important;
-  width: max-content !important;
-  max-width: calc(100vw - 24px) !important;
-  /* The cap is on the border box, so the bar keeps its gutter instead of the
-     padding pushing it out to exactly the width of the window. */
-  box-sizing: border-box !important;
-  display: flex !important;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 10px 8px 14px;
-  border-radius: 999px;
-  background: #101014;
-  color: #fff;
-  font: 500 13px/1 ui-sans-serif, system-ui, -apple-system, sans-serif;
-  box-shadow: 0 6px 24px rgb(0 0 0 / 35%);
-  user-select: none;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  overflow: visible !important;
+  /* Also the fallback. The UA hides a popover that is not open; stating this
+     means a browser where showPopover() fails still renders the panel, in the
+     ordinary layer, exactly as it did before. */
+  display: block !important;
+
+  /*
+   * The root is the viewport, and is the containing block for everything in it.
+   *
+   * Both halves matter when Atelier has had to move inside a site's own modal
+   * to get above it. A `position: fixed` element is positioned against the
+   * nearest ancestor with a transform, a filter or `contain` — not against the
+   * viewport — so inside such a host the panel would arrive offset by wherever
+   * that host happens to sit, which for a side sheet is most of the screen.
+   *
+   * Declaring the transform here makes *us* that ancestor wherever we are, so
+   * the panel and the launcher are always positioned against this box; and
+   * `pinOrigin()` measures where this box landed and slides it back onto the
+   * viewport's origin. Measuring beats keeping a list of the properties that
+   * establish a containing block: that list grows, and a missing entry would be
+   * a bug visible only on the one site that used it.
+   */
+  transform: translateZ(0) !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  /* A box the size of the window would otherwise swallow every click on the
+     page. Only the things Atelier actually draws take one — see the very end of
+     this file, where that is given back. */
+  pointer-events: none !important;
 }
 
-#atelier-bar .atelier-dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #e5484d;
-  animation: atelier-pulse 1.4s ease-in-out infinite;
+#atelier-root *,
+#atelier-root *::before,
+#atelier-root *::after {
+  box-sizing: border-box !important;
+}
+
+#atelier-root [hidden] {
+  display: none !important;
+}
+
+/* ------------------------------------------------------------ launcher --- */
+
+/*
+ * Collapsed, Atelier is one orange square with an A in it. It is the whole of
+ * the interface until you want more of it, which is the right trade for a thing
+ * that sits on top of somebody else's page for twenty minutes at a time.
+ */
+#atelier-launcher {
+  all: unset !important;
+  position: fixed !important;
+  z-index: 2147483647 !important;
+  right: 20px !important;
+  bottom: 20px !important;
+  display: grid !important;
+  place-items: center !important;
+  width: 46px !important;
+  height: 46px !important;
+  border-radius: 15px !important;
+  background: var(--at-accent) !important;
+  color: #fff !important;
+  cursor: grab !important;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 34%) !important;
+  user-select: none !important;
+  touch-action: none !important;
+}
+
+#atelier-launcher:active {
+  cursor: grabbing !important;
+}
+
+#atelier-launcher .at-glyph {
+  font: 800 19px/1 ui-serif, Georgia, serif !important;
+  color: #fff !important;
+}
+
+/* The recording light. Small, because a mode indicator that shouts is a mode
+   indicator people cover up. */
+#atelier-launcher .at-pip {
+  position: absolute !important;
+  top: -3px !important;
+  right: -3px !important;
+  width: 11px !important;
+  height: 11px !important;
+  border-radius: 50% !important;
+  background: #fff !important;
+  border: 3px solid var(--at-accent-deep) !important;
+  animation: atelier-pulse 1.6s ease-in-out infinite !important;
 }
 
 @keyframes atelier-pulse {
@@ -53,209 +154,561 @@
   50% { opacity: 0.25; }
 }
 
-/* The name is the one thing allowed to give way when the window is narrow:
-   truncating it costs nothing, since it is on screen in the popup too,
-   whereas a wrapped button moves mid-recording and changes what it looks like. */
-#atelier-bar .atelier-name {
-  flex: 0 1 auto;
-  min-width: 4ch;
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#atelier-bar .atelier-count {
-  flex: none;
-  white-space: nowrap;
-  opacity: 0.5;
-  font-variant-numeric: tabular-nums;
-}
-#atelier-bar .atelier-status {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* --------------------------------------------------------------- panel --- */
 
-#atelier-bar .atelier-btn {
-  all: unset;
-  cursor: pointer;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: rgb(255 255 255 / 12%);
-  font: inherit;
-  color: #fff;
-  /* `all: unset` resets white-space to normal, so without these two a squeezed
-     bar breaks "Capture result" across two lines inside its own pill. A control
-     never shrinks or wraps; the name above truncates instead. */
-  white-space: nowrap;
-  flex: none;
-}
-#atelier-bar .atelier-btn:hover { background: rgb(255 255 255 / 22%); }
-#atelier-bar .atelier-btn.atelier-armed { background: #2d7d46; }
-#atelier-bar .atelier-stop { background: #e5484d; }
-#atelier-bar .atelier-stop:hover { background: #f2555a; }
-
-/* While the picker is armed, make it obvious that the next click is a choice
-   and not an interaction with the page. */
-html.atelier-picking, html.atelier-picking * { cursor: crosshair !important; }
-html.atelier-picking *:hover { outline: 2px solid #2d7d46 !important; }
-
-/* Save is the primary action and says so. The old bar had "Stop", and the
-   README had to explain in bold that Stop was what saved the recording — when
-   documentation has to account for the absence of a control, the control is
-   missing. */
-#atelier-bar .atelier-save {
-  background: #2d7d46;
-  color: #fff;
-}
-#atelier-bar .atelier-save:hover { background: #369252; }
-
-#atelier-bar .atelier-ghost {
-  background: transparent;
-  color: rgb(255 255 255 / 60%);
-}
-#atelier-bar .atelier-ghost:hover { color: #fff; }
-
-#atelier-bar .atelier-status {
-  font-size: 12px;
-  opacity: 0.65;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/*
+ * Tall and narrow: 90% of the window's height, and wide enough that a step box
+ * with a target, an action and a value in it does not wrap into a column of
+ * single words. On a phone-width window it gives up the minimum and takes the
+ * gutter instead, because the alternative is a panel wider than the screen with
+ * its Save button off the right-hand edge.
+ */
+#atelier-panel {
+  position: fixed !important;
+  z-index: 2147483647 !important;
+  top: 5vh !important;
+  right: 20px !important;
+  height: 90vh !important;
+  width: 560px !important;
+  max-width: calc(100vw - 32px) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  background: var(--at-panel) !important;
+  border: 1px solid var(--at-line) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 24px 70px rgb(0 0 0 / 52%) !important;
+  overflow: hidden !important;
 }
 
-#atelier-bar .atelier-btn:disabled { opacity: 0.35; cursor: default; }
+@media (max-width: 620px) {
+  #atelier-panel {
+    right: 12px !important;
+    left: 12px !important;
+    width: auto !important;
+  }
+}
 
-/* ------------------------------------------------------------- review ---
-   The recording, read back in the page it was made in. Everything here is
-   !important and every value is stated: this card is injected into documents
-   whose stylesheets we have never seen, and a review that inherits a page's
-   line-height or its list markers is a review nobody can read. */
+#atelier-root.at-busy #atelier-panel {
+  pointer-events: none !important;
+  opacity: 0.6 !important;
+}
 
-#atelier-review {
+.at-head {
+  display: flex !important;
+  align-items: center !important;
+  gap: 11px !important;
+  padding: 14px 16px !important;
+  border-bottom: 1px solid var(--at-line) !important;
+  flex: none !important;
+}
+
+.at-glyph-sm {
+  display: grid !important;
+  place-items: center !important;
+  width: 26px !important;
+  height: 26px !important;
+  flex: none !important;
+  border-radius: 8px !important;
+  background: var(--at-accent) !important;
+  color: #fff !important;
+  font: 800 14px/1 ui-serif, Georgia, serif !important;
+}
+
+.at-heading {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 1px !important;
+  min-width: 0 !important;
+  flex: 1 !important;
+}
+
+.at-heading b {
+  font: 600 14px/1.3 inherit !important;
+  color: var(--at-ink) !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.at-heading span {
+  font-size: 11px !important;
+  color: var(--at-faint) !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.at-icon {
+  all: unset !important;
+  cursor: pointer !important;
+  display: grid !important;
+  place-items: center !important;
+  width: 28px !important;
+  height: 28px !important;
+  flex: none !important;
+  border-radius: 8px !important;
+  color: var(--at-faint) !important;
+  font-size: 17px !important;
+}
+
+.at-icon:hover {
+  background: var(--at-sunk) !important;
+  color: var(--at-ink) !important;
+}
+
+.at-body {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+  padding: 14px 16px 18px !important;
+}
+
+/* ------------------------------------------------------------ composer --- */
+
+/*
+ * Sticky at the top, immediately above the newest step. The list reads bottom
+ * to top, so what you just added is what is directly under the thing that added
+ * it — which is the only arrangement where both the composer and the last step
+ * are in front of you at once.
+ */
+.at-compose {
+  position: sticky !important;
+  top: -14px !important;
+  z-index: 2 !important;
+  margin: -14px -16px 14px !important;
+  padding: 14px 16px !important;
+  background: var(--at-panel) !important;
+  border-bottom: 1px solid var(--at-line) !important;
+}
+
+.at-idle {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 9px !important;
+}
+
+.at-card {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 13px !important;
+  padding: 14px !important;
+  border-radius: 12px !important;
+  background: var(--at-sunk) !important;
+  border: 1px solid var(--at-line) !important;
+}
+
+.at-field {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
+}
+
+.at-sub-field {
+  padding-top: 4px !important;
+}
+
+.at-label {
+  font: 700 10px/1.4 inherit !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  color: var(--at-faint) !important;
+}
+
+.at-note {
+  margin: 0 !important;
+  font-size: 11.5px !important;
+  line-height: 1.55 !important;
+  color: var(--at-faint) !important;
+}
+
+.at-error {
+  margin: 0 !important;
+  padding: 9px 11px !important;
+  border-radius: 9px !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+  background: rgb(255 101 82 / 13%) !important;
+  color: #ffb3a6 !important;
+}
+
+.at-input {
+  all: unset !important;
+  box-sizing: border-box !important;
+  display: block !important;
+  width: 100% !important;
+  padding: 8px 11px !important;
+  border-radius: 9px !important;
+  border: 1px solid var(--at-line) !important;
+  background: var(--at-page) !important;
+  color: var(--at-ink) !important;
+  font: 400 13px/1.5 inherit !important;
+  cursor: text !important;
+}
+
+select.at-input {
+  cursor: pointer !important;
+  /* A select with `all: unset` loses its arrow, and a dropdown that does not
+     look like one is a dropdown nobody opens. */
+  appearance: auto !important;
+  padding: 7px 9px !important;
+}
+
+.at-area {
+  min-height: 62px !important;
+  resize: vertical !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  font-size: 12px !important;
+  white-space: pre-wrap !important;
+}
+
+.at-input:focus {
+  outline: 2px solid var(--at-accent) !important;
+  outline-offset: -1px !important;
+}
+
+/* Two halves of one decision, so they are drawn as one control rather than as
+   two buttons that happen to be next to each other. */
+.at-seg {
+  display: flex !important;
+  gap: 0 !important;
+  border: 1px solid var(--at-line) !important;
+  border-radius: 9px !important;
+  overflow: hidden !important;
+}
+
+.at-seg-btn {
+  all: unset !important;
+  cursor: pointer !important;
+  flex: 1 !important;
+  text-align: center !important;
+  padding: 7px 10px !important;
+  font: 500 12px/1.4 inherit !important;
+  color: var(--at-dim) !important;
+}
+
+.at-seg-btn:hover {
+  background: rgb(247 242 234 / 6%) !important;
+}
+
+.at-seg-btn.is-on {
+  background: var(--at-ink) !important;
+  color: var(--at-page) !important;
+  font-weight: 600 !important;
+}
+
+.at-actions {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+}
+
+.at-btn {
+  all: unset !important;
+  cursor: pointer !important;
+  padding: 8px 15px !important;
+  border-radius: 999px !important;
+  background: rgb(247 242 234 / 10%) !important;
+  color: var(--at-ink) !important;
+  font: 500 12.5px/1 inherit !important;
+  white-space: nowrap !important;
+}
+
+.at-btn:hover {
+  background: rgb(247 242 234 / 18%) !important;
+}
+
+.at-wide {
+  text-align: center !important;
+}
+
+.at-primary {
+  background: var(--at-accent) !important;
+  color: #fff !important;
+}
+
+.at-primary:hover {
+  background: var(--at-accent-deep) !important;
+}
+
+.at-danger {
+  background: #b23b28 !important;
+  color: #fff !important;
+}
+
+.at-ghost {
+  background: transparent !important;
+  color: var(--at-faint) !important;
+}
+
+.at-ghost:hover {
+  background: transparent !important;
+  color: var(--at-ink) !important;
+}
+
+.at-link {
+  all: unset !important;
+  cursor: pointer !important;
+  font-size: 11.5px !important;
+  color: var(--at-faint) !important;
+  text-decoration: underline !important;
+  text-underline-offset: 2px !important;
+  margin-top: 8px !important;
+  display: inline-block !important;
+}
+
+.at-link:hover {
+  color: var(--at-ink) !important;
+}
+
+/* ------------------------------------------------------------ pipeline --- */
+
+/*
+ * The steps, as a pipeline: a rule down the left, a numbered node per step, and
+ * the boxes hanging off it. The line is drawn on the list rather than per step
+ * so it is continuous — a border on each box leaves a hairline gap at every
+ * join, which reads as a broken pipe rather than a list.
+ */
+.at-steps {
+  list-style: none !important;
+  margin: 0 !important;
+  padding: 0 0 0 26px !important;
+  position: relative !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 10px !important;
+}
+
+.at-steps.at-has-steps::before {
+  content: "" !important;
+  position: absolute !important;
+  left: 9px !important;
+  top: 12px !important;
+  bottom: 12px !important;
+  width: 2px !important;
+  background: var(--at-line) !important;
+  border-radius: 2px !important;
+}
+
+.at-step {
+  position: relative !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  list-style: none !important;
+}
+
+.at-node {
+  position: absolute !important;
+  left: -26px !important;
+  top: 11px !important;
+  display: grid !important;
+  place-items: center !important;
+  width: 20px !important;
+  height: 20px !important;
+  border-radius: 50% !important;
+  background: var(--at-accent) !important;
+  color: #fff !important;
+  font: 700 10px/1 inherit !important;
+  font-variant-numeric: tabular-nums !important;
+}
+
+.at-box {
+  padding: 11px 13px !important;
+  border-radius: 11px !important;
+  background: var(--at-sunk) !important;
+  border: 1px solid var(--at-line) !important;
+}
+
+.at-row {
+  display: grid !important;
+  grid-template-columns: 62px minmax(0, 1fr) !important;
+  gap: 10px !important;
+  align-items: baseline !important;
+  padding: 2px 0 !important;
+}
+
+.at-k {
+  font: 700 9.5px/1.6 inherit !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  color: var(--at-faint) !important;
+}
+
+.at-v {
+  font-size: 12.5px !important;
+  color: var(--at-ink) !important;
+  overflow-wrap: anywhere !important;
+}
+
+/* The value is the reason the box exists once a step types something, so it is
+   set in a face you can check a character against. */
+.at-value {
+  margin: 8px 0 0 !important;
+  padding: 7px 9px !important;
+  border-radius: 8px !important;
+  background: rgb(247 242 234 / 5%) !important;
+  font: 400 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+  color: var(--at-ok) !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  max-height: 7.5em !important;
+  overflow: auto !important;
+}
+
+.at-value.is-dynamic {
+  color: #ffd79a !important;
+}
+
+.at-value.is-secret {
+  color: var(--at-faint) !important;
+  font-family: inherit !important;
+  font-style: italic !important;
+}
+
+.at-edit {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  margin-top: 10px !important;
+}
+
+.at-empty {
+  padding: 18px 14px !important;
+  border: 1px dashed var(--at-line) !important;
+  border-radius: 11px !important;
+  color: var(--at-faint) !important;
+  font-size: 12px !important;
+  text-align: center !important;
+}
+
+/* ---------------------------------------------------------------- foot --- */
+
+.at-foot {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 12px 16px !important;
+  border-top: 1px solid var(--at-line) !important;
+  background: var(--at-panel) !important;
+  flex: none !important;
+}
+
+.at-foot .at-ghost {
+  margin-left: auto !important;
+}
+
+/* ---------------------------------------------------------- picking --- */
+
+/*
+ * While the picker is armed, every click is a choice about the page rather than
+ * an interaction with it, and the cursor alone is not enough to say so — which
+ * is what the line of text is for.
+ */
+html.at-picking,
+html.at-picking * {
+  cursor: crosshair !important;
+}
+
+html.at-picking *:hover {
+  outline: 2px solid #ff6552 !important;
+  outline-offset: 1px !important;
+}
+
+html.at-picking #atelier-root,
+html.at-picking #atelier-root * {
+  cursor: default !important;
+  outline: none !important;
+}
+
+.at-hint {
+  position: fixed !important;
+  z-index: 2147483647 !important;
+  top: 16px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  max-width: calc(100vw - 32px) !important;
+  padding: 9px 16px !important;
+  border-radius: 999px !important;
+  background: #101014 !important;
+  color: #fff !important;
+  font: 500 12.5px/1 ui-sans-serif, system-ui, sans-serif !important;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 40%) !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  pointer-events: none !important;
+}
+
+/* --------------------------------------------------------------- modal --- */
+
+/*
+ * Atelier's own dialogs. `window.prompt` and `window.confirm` are modal to the
+ * whole tab, cannot be styled, and read as though the *site* is asking — at the
+ * exact moment the question is about Atelier.
+ */
+.at-modal {
   position: fixed !important;
   inset: 0 !important;
   z-index: 2147483647 !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
-  padding: 32px 16px !important;
-  margin: 0 !important;
-  background: rgb(0 0 0 / 62%) !important;
+  padding: 24px !important;
+  background: rgb(0 0 0 / 58%) !important;
   backdrop-filter: blur(2px);
-  font: 400 14px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif !important;
-  color: #fff !important;
-  box-sizing: border-box !important;
 }
 
-#atelier-review .atelier-review-card {
-  width: min(720px, 100%) !important;
-  max-height: 100% !important;
+.at-modal-card {
+  width: min(440px, 100%) !important;
+  max-height: 80vh !important;
   overflow: auto !important;
-  box-sizing: border-box !important;
-  background: #16161a !important;
-  border: 1px solid rgb(255 255 255 / 12%) !important;
-  border-radius: 16px !important;
-  padding: 26px 28px 22px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 12px !important;
+  padding: 22px !important;
+  border-radius: 14px !important;
+  background: var(--at-panel) !important;
+  border: 1px solid var(--at-line) !important;
   box-shadow: 0 24px 70px rgb(0 0 0 / 55%) !important;
 }
 
-#atelier-review h2 {
-  margin: 0 0 8px !important;
-  font: 600 19px/1.3 inherit !important;
-  color: #fff !important;
-}
-#atelier-review .atelier-review-head p {
-  margin: 0 0 20px !important;
-  font-size: 13px !important;
-  line-height: 1.6 !important;
-  color: rgb(255 255 255 / 62%) !important;
-}
-#atelier-review b { font-weight: 600 !important; color: rgb(255 255 255 / 88%) !important; }
-
-#atelier-review .atelier-review-list {
-  list-style: none !important;
-  margin: 0 0 22px !important;
-  padding: 0 !important;
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 2px !important;
-}
-#atelier-review .atelier-review-list li {
-  display: grid !important;
-  grid-template-columns: minmax(0, 1fr) auto !important;
-  align-items: center !important;
-  gap: 4px 16px !important;
-  padding: 9px 12px !important;
+.at-modal-card h2 {
   margin: 0 !important;
-  border-radius: 9px !important;
-}
-#atelier-review .atelier-review-list li:hover { background: rgb(255 255 255 / 4%) !important; }
-
-#atelier-review .atelier-review-line { font-size: 13px !important; color: rgb(255 255 255 / 86%) !important; }
-#atelier-review .atelier-verb { color: rgb(255 255 255 / 45%) !important; }
-
-/* The value is the reason the screen exists, so it is the thing set in a
-   typeface you can check a character against. */
-#atelier-review .atelier-review-value {
-  grid-column: 1 !important;
-  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
-  color: #8fd5a8 !important;
-  background: rgb(255 255 255 / 5%) !important;
-  border-radius: 7px !important;
-  padding: 6px 9px !important;
-  margin-top: 5px !important;
-  word-break: break-word !important;
-}
-#atelier-review .atelier-review-value.is-kept { color: #ffd79a !important; }
-#atelier-review .atelier-review-value.is-secret {
-  color: rgb(255 255 255 / 45%) !important;
-  font-style: italic !important;
-  font-family: inherit !important;
+  font: 600 16px/1.35 ui-serif, Georgia, serif !important;
+  color: var(--at-ink) !important;
 }
 
-#atelier-review .atelier-review-toggle {
-  grid-column: 2 !important;
-  grid-row: 1 / span 2 !important;
-  display: flex !important;
-  align-items: center !important;
-  gap: 7px !important;
-  font-size: 12px !important;
-  color: rgb(255 255 255 / 55%) !important;
-  cursor: pointer !important;
-  user-select: none !important;
-  white-space: nowrap !important;
+@media (prefers-reduced-motion: reduce) {
+  #atelier-root *,
+  #atelier-launcher .at-pip {
+    animation: none !important;
+    transition: none !important;
+  }
 }
-#atelier-review .atelier-review-toggle input { margin: 0 !important; cursor: pointer !important; accent-color: #2d7d46 !important; }
-#atelier-review .atelier-review-toggle:has(:checked) { color: #fff !important; }
 
-#atelier-review .atelier-review-actions {
-  display: flex !important;
-  align-items: center !important;
-  gap: 10px !important;
-  padding-top: 18px !important;
-  border-top: 1px solid rgb(255 255 255 / 10%) !important;
-}
-#atelier-review .atelier-btn {
-  all: unset !important;
-  cursor: pointer !important;
-  padding: 9px 16px !important;
-  border-radius: 999px !important;
-  background: rgb(255 255 255 / 12%) !important;
-  color: #fff !important;
-  font: 500 13px/1 inherit !important;
-  white-space: nowrap !important;
-}
-#atelier-review .atelier-btn:hover { background: rgb(255 255 255 / 20%) !important; }
-#atelier-review .atelier-save { background: #2d7d46 !important; }
-#atelier-review .atelier-save:hover { background: #369252 !important; }
-#atelier-review .atelier-ghost { background: transparent !important; color: rgb(255 255 255 / 50%) !important; margin-left: auto !important; }
-#atelier-review .atelier-ghost:hover { color: #fff !important; background: transparent !important; }
+/* ------------------------------------------------------ hit testing --- */
 
-/* The bar is a handle everywhere except on its controls. */
-#atelier-bar { cursor: grab !important; user-select: none !important; }
-#atelier-bar.atelier-dragging { cursor: grabbing !important; }
-#atelier-bar .atelier-btn { cursor: pointer !important; }
+/*
+ * The root is the size of the window and takes no clicks, so its children have
+ * to take their own back. This is the last rule in the file, and that is
+ * load-bearing rather than tidy.
+ *
+ * Every control here starts with `all: unset`, which resets `pointer-events` to
+ * its *inherited* value — `none`, from the root. Both selectors are one id, so
+ * they tie on specificity and both are `!important`, which means whichever
+ * comes last wins. Declared earlier, this rule lost to `#atelier-launcher`'s own
+ * reset and the launcher became unclickable *and* invisible to
+ * `elementFromPoint`, which is how the panel decides whether it has been
+ * buried — so it concluded it was under a site overlay while sitting happily on
+ * top of one.
+ */
+#atelier-root > * {
+  pointer-events: auto !important;
+}
+
+/* Except the hint, which is a line of text across the top of the window while
+   the picker is armed. It must not stand between the person and the thing they
+   are pointing at. A second id beats the catch-all above on specificity. */
+#atelier-root > .at-hint {
+  pointer-events: none !important;
+}

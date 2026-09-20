@@ -27,8 +27,8 @@ COPY --from=build /app/server/dist ./server/dist
 # reachable by nothing at all. The compose file puts the boundary back by
 # publishing this port to the *host's* loopback rather than to every interface.
 ENV ATELIER_BIND=0.0.0.0
-# State lives on a volume, not in the image: workflows, assets and the token
-# have to survive a rebuild.
+# State lives on a volume, not in the image: workflows, assets and every
+# project's token have to survive a rebuild.
 ENV ATELIER_HOME=/data
 RUN mkdir -p /data && chown -R node:node /data
 USER node

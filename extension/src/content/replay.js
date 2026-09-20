@@ -3,16 +3,47 @@
  *
  * Injected fresh per step, so it defines window.__atelierReplay idempotently and
  * keeps no state between calls — the daemon owns the job's position, not us.
+ *
+ * It is also what performs a step while one is being *recorded*. The person
+ * points at an element and names an action; this is what does it. One executor
+ * for both means a step that could not be performed is refused while somebody
+ * is still looking at the page, rather than discovered on the first run — and
+ * it means recording cannot drift from replay, because there is nothing for it
+ * to drift from.
  */
 ;(() => {
   if (window.__atelierReplay) return
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+  /**
+   * Atelier's own furniture is not part of the page.
+   *
+   * The control panel is in the document while a workflow is being recorded,
+   * and a step is performed through this same executor at that moment — so a
+   * text selector looking for "Save" would happily find the panel's own Save
+   * button. Everything Atelier draws lives under one root for exactly this
+   * reason.
+   *
+   * The skip has to happen *while* resolving rather than after it. A selector
+   * that matches our panel first and the real control second would otherwise
+   * resolve to the panel, be rejected, and take the whole candidate with it —
+   * so the step would fail on a selector that was matching the right element
+   * all along, two nodes further down the document.
+   */
+  const ours = (el) => !!el?.closest?.('#atelier-root')
+
   /** Resolve a selector candidate to an element. Strategies are tried by the
    *  caller in score order; this just knows how to run one. */
   function resolveOne(candidate) {
     const { strategy, value } = candidate
+    const first = (nodes, match) => {
+      for (const node of nodes) {
+        if (ours(node)) continue
+        if (!match || match(node)) return node
+      }
+      return null
+    }
     try {
       switch (strategy) {
         case 'testid':
@@ -21,28 +52,26 @@
         case 'name':
         case 'placeholder':
         case 'css':
-          return document.querySelector(value)
+          return first(document.querySelectorAll(value))
         case 'role': {
           // "role:accessible name" — matched case-insensitively on trimmed text.
           const [role, ...rest] = value.split(':')
           const wanted = rest.join(':').trim().toLowerCase()
-          const nodes = [...document.querySelectorAll(`[role="${role}"], ${role}`)]
-          return (
-            nodes.find((n) => {
-              const label =
-                n.getAttribute('aria-label') || n.textContent || n.value || ''
-              return label.trim().toLowerCase() === wanted
-            }) || null
-          )
+          return first(document.querySelectorAll(`[role="${role}"], ${role}`), (n) => {
+            const label = n.getAttribute('aria-label') || n.textContent || n.value || ''
+            return label.trim().toLowerCase() === wanted
+          })
         }
         case 'text': {
           const wanted = value.trim().toLowerCase()
-          const nodes = [...document.querySelectorAll('button, a, [role="button"], label, span, div')]
-          return nodes.find((n) => n.textContent?.trim().toLowerCase() === wanted) || null
+          return first(
+            document.querySelectorAll('button, a, [role="button"], label, span, div'),
+            (n) => n.textContent?.trim().toLowerCase() === wanted,
+          )
         }
         case 'xpath': {
           const r = document.evaluate(value, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
-          return r.singleNodeValue
+          return ours(r.singleNodeValue) ? null : r.singleNodeValue
         }
         default:
           return null
@@ -69,6 +98,14 @@
    * positional XPath looks identical to one matching on the data-testid it was
    * recorded with, until the position moves too. Reporting the winner is how
    * the daemon can warn before that happens.
+   *
+   * The retry loop is also how Atelier survives a page that changes a variable
+   * moment after the previous step — clicking a button, submitting a form,
+   * routing to another view. There is no observer and nothing to configure: a
+   * step whose element is not there yet is indistinguishable from one whose
+   * element is about to appear, so it looks again a fraction of a second later
+   * until the timeout runs out. That timeout is a patience budget, set per step
+   * when the workflow is written: generous for a capture, ordinary for a click.
    */
   async function find(selectors, timeoutMs) {
     const ordered = [...(selectors || [])].sort((a, b) => b.score - a.score)
@@ -77,8 +114,9 @@
     while (Date.now() < deadline) {
       for (const candidate of ordered) {
         const el = resolveOne(candidate)
-        if (el && visible(el)) return { el, matched: candidate }
-        if (el) last = { el, matched: candidate }
+        if (!el || ours(el)) continue
+        if (visible(el)) return { el, matched: candidate }
+        last = { el, matched: candidate }
       }
       await sleep(120)
     }
@@ -146,6 +184,21 @@
         el.textContent = value
         el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }))
       }
+      return
+    }
+
+    // A select is matched on its option text as well as its value, because the
+    // text is what the person recording read and the value is an implementation
+    // detail they never saw.
+    if (el instanceof HTMLSelectElement) {
+      const wanted = String(value).trim().toLowerCase()
+      const option = [...el.options].find(
+        (o) => o.value === value || o.text.trim().toLowerCase() === wanted,
+      )
+      if (option) el.value = option.value
+      else el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+      el.dispatchEvent(new Event('change', { bubbles: true }))
       return
     }
 
@@ -243,6 +296,23 @@
         case 'select':
           setValue(el, step.value ?? '')
           break
+        // Set rather than toggled, and only when it is not already there: a
+        // toggle replayed against a box that happens to start the other way
+        // round produces the opposite of what was recorded, which is the kind
+        // of bug that only shows up on someone else's account.
+        case 'check':
+        case 'uncheck': {
+          const wanted = step.kind === 'check'
+          if (el.checked !== wanted) el.click()
+          if (el.checked !== wanted) {
+            return {
+              ok: false,
+              reason: `could not ${wanted ? 'tick' : 'untick'} "${step.target || step.kind}" — it may be disabled`,
+              recoverable: true,
+            }
+          }
+          break
+        }
         case 'key':
           document.activeElement?.dispatchEvent(
             new KeyboardEvent('keydown', { key: step.value, bubbles: true }),
@@ -259,9 +329,20 @@
         case 'capture': {
           const as = step.capture?.as || 'image'
           if (as === 'text') {
-            const value = el.value ?? el.textContent ?? ''
-            if (!value.trim()) return { ok: false, reason: 'the captured element was empty', recoverable: true }
-            return { ok: true, matched, capture: { as: 'text', value } }
+            // Which text. "What this field currently holds" and "what it is
+            // prompting for" are different questions, and only the person who
+            // recorded the step knows which they meant — so they said.
+            const from = step.capture?.from || 'auto'
+            const value =
+              from === 'placeholder'
+                ? (el.getAttribute?.('placeholder') ?? '')
+                : from === 'value'
+                  ? (el.value ?? el.textContent ?? '')
+                  : (el.value ?? el.innerText ?? el.textContent ?? '')
+            if (!String(value).trim()) {
+              return { ok: false, reason: 'the captured element was empty', recoverable: true }
+            }
+            return { ok: true, matched, capture: { as: 'text', value: String(value) } }
           }
 
           const source = resolveSource(el, step.capture?.attribute)

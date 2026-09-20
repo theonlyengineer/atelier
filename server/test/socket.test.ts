@@ -123,10 +123,10 @@ test('a connected browser unblocks a job that was waiting for one', async () => 
 
 /* ------------------------------------------------ recording → workflow */
 
-test('a saved recording becomes a proposed workflow without anyone asking', async () => {
-  // This is the whole of finding 05. Saving a recording used to leave a draft
-  // in the panel under the words "ask Claude Code to review drafts" — the
-  // product handing the user an errand in another application.
+test('a saved recording becomes a workflow without anyone asking', async () => {
+  // Saving a recording used to leave a draft in the popup under the words "ask
+  // Claude Code to review drafts" — the product handing the user an errand in
+  // another application.
   const proposed = await session(
     (ws) => {
       ws.send(
@@ -135,32 +135,27 @@ test('a saved recording becomes a proposed workflow without anyone asking', asyn
           name: 'auto-proposed',
           origins: ['https://example.test'],
           raw: {
-            actions: [
-              { kind: 'navigate', value: 'https://example.test/app', origin: 'https://example.test' },
+            startUrl: 'https://example.test/app',
+            steps: [
               {
                 kind: 'type',
-                element: {
-                  tag: 'textarea',
-                  label: 'Prompt',
-                  selectors: [{ strategy: 'id', value: '#prompt', score: 92 }],
-                },
-                value: 'a long piece of text that is clearly the parameter of this workflow',
+                target: 'Prompt',
+                identifier: { strategy: 'placeholder', value: '[placeholder="Prompt"]', score: 96 },
+                selectors: [{ strategy: 'id', value: '#prompt', score: 92 }],
+                valueMode: 'dynamic',
+                sampleValue: 'a rope bridge with its middle planks missing',
+                inputName: 'prompt',
               },
               {
                 kind: 'click',
-                element: {
-                  tag: 'button',
-                  label: 'Generate',
-                  selectors: [{ strategy: 'testid', value: '[data-testid="go"]', score: 98 }],
-                },
+                target: 'Generate',
+                identifier: { strategy: 'text', value: 'Generate', score: 96 },
+                selectors: [{ strategy: 'testid', value: '[data-testid="go"]', score: 98 }],
               },
               {
                 kind: 'capture',
-                element: {
-                  tag: 'img',
-                  label: 'result',
-                  selectors: [{ strategy: 'css', value: 'main img', score: 40 }],
-                },
+                target: 'The result',
+                selectors: [{ strategy: 'css', value: 'main img', score: 40 }],
                 capture: { as: 'image', attribute: 'src' },
               },
             ],
@@ -177,13 +172,17 @@ test('a saved recording becomes a proposed workflow without anyone asking', asyn
 
   const saved = repo.getWorkflowByName('auto-proposed')!
   assert.ok(saved, 'the proposal should be persisted')
-  // Proposed, never live. Nothing runs until a human says so in the panel.
+  // Proposed, never live. Nothing runs until a human says so.
   assert.equal(saved.status, 'draft')
-  // And the inference a recording cannot contain: the click before the capture
-  // now waits for the result that did not exist when it was recorded.
-  const trigger = saved.steps.find((s) => s.note?.startsWith('Click Generate'))!
-  assert.ok(trigger.waitAfter, 'the trigger step should wait for the result')
-  assert.equal(trigger.waitAfter!.kind, 'visible')
+  // The name the person confirmed leads the selector list, so the workflow
+  // reads as a sentence when somebody comes to it cold.
+  const trigger = saved.steps.find((s) => s.target === 'Generate')!
+  assert.equal(trigger.selectors[0]!.value, 'Generate')
+  // And the wait nobody was there to do: at record time the person waited for
+  // the image before pointing at it, so the capture has to wait on replay.
+  const capture = saved.steps.find((s) => s.kind === 'capture')!
+  assert.equal(capture.waitBefore!.kind, 'visible')
+  assert.equal(capture.timeoutMs, 180_000)
 })
 
 test('a recording that cannot be replayed does not silently become a workflow', async () => {
@@ -194,7 +193,7 @@ test('a recording that cannot be replayed does not silently become a workflow', 
           t: 'draft.save',
           name: 'unusable-recording',
           origins: ['https://example.test'],
-          raw: { actions: [{ kind: 'click', element: { tag: 'div', selectors: [] } }] },
+          raw: { startUrl: 'https://example.test/app', steps: [] },
         }),
       )
     },

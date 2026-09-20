@@ -26,8 +26,6 @@ export type ServerMsg =
   /** Everything the popup renders. Pushed on every state change so the
    *  panel never polls and never computes. */
   | { t: 'state'; jobs: Job[]; drafts: number; workflows: { name: string; produces: string }[] }
-  | { t: 'record.started'; draftName: string }
-  | { t: 'record.stopped' }
   /** A recording became a proposed workflow. The panel shows it for
    *  confirmation; nothing runs until a human activates it. */
   | { t: 'workflow.proposed'; name: string; steps: number; inputs: string[]; produces: string }
@@ -65,9 +63,10 @@ export type ClientMsg =
   | { t: 'job.resume'; jobId: string }
   | { t: 'job.cancel'; jobId: string }
   | { t: 'draft.save'; name: string; origins: string[]; raw: unknown }
-  /** One step re-recorded in place, to repair a workflow whose page moved
-   *  rather than re-recording the whole thing. */
-  | { t: 'step.rerecord'; workflowName: string; stepId: string; action: unknown }
+  /** One step pointed at a new element, to repair a workflow whose page moved
+   *  rather than re-recording the whole thing. Only the selectors and the name
+   *  change; what the step *does* was decided once and stands. */
+  | { t: 'step.repoint'; workflowName: string; stepId: string; pick: unknown }
   /** Ask for a state frame now. The popup opens at an arbitrary moment and
    *  the daemon only pushes on change, so without this a panel opened during a
    *  quiet period renders whatever the service worker last happened to cache. */

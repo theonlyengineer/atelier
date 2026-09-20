@@ -15,27 +15,36 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.ATELIER_HOME = mkdtempSync(join(tmpdir(), 'atelier-mcp-'))
-process.env.ATELIER_TOKEN = 'test-token-not-a-real-one'
 const PORT = 7801
 const URL = `http://127.0.0.1:${PORT}/mcp`
 
 const { startDaemon } = await import('../src/daemon.ts')
+const repo = await import('../src/db/repo.ts')
 
 let stop: () => void
+/** The token a project was born with. It is the credential *and* the scope —
+ *  presenting it is what says which project this agent is working in. */
+let token: string
+let projectId: string
+
 before(async () => {
   stop = (await startDaemon(PORT)).close
+  const project = repo.activeProject()
+  projectId = project.id
+  token = project.token
+  HEADERS.authorization = `Bearer ${token}`
 })
 after(() => stop?.())
 
 const rpc = (id: number, method: string, params: unknown = {}) =>
   JSON.stringify({ jsonrpc: '2.0', id, method, params })
 
-const HEADERS = {
+const HEADERS: Record<string, string> = {
   'content-type': 'application/json',
   // Both are required by the spec's content negotiation: a Streamable HTTP
   // server may answer a POST with either a JSON body or an SSE stream.
   accept: 'application/json, text/event-stream',
-  authorization: 'Bearer test-token-not-a-real-one',
+  authorization: '',
 }
 
 /** One frame out of a response that may be JSON or an SSE stream. */
@@ -82,6 +91,31 @@ test('the MCP endpoint refuses a wrong token', async () => {
     body: rpc(1, 'initialize', {}),
   })
   assert.equal(res.status, 401)
+})
+
+test('a token from another project is still a token, and still opens only that project', async () => {
+  const other = repo.createProject('Elsewhere')
+  const res = await fetch(URL, {
+    method: 'POST',
+    headers: { ...HEADERS, authorization: `Bearer ${other.token}` },
+    body: rpc(1, 'initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'test', version: '0' },
+    }),
+  })
+  assert.equal(res.ok, true)
+  const sessionId = res.headers.get('mcp-session-id')!
+  await res.text()
+  const status = await fetch(URL, {
+    method: 'POST',
+    headers: { ...HEADERS, authorization: `Bearer ${other.token}`, 'mcp-session-id': sessionId },
+    body: rpc(2, 'tools/call', { name: 'atelier_status', arguments: {} }),
+  })
+  const payload = await readResult(status)
+  // The whole point of a per-project token: the session knows where it is
+  // working from its first call, and was never asked.
+  assert.match(payload.result.content[0].text, /Working in project "elsewhere"/)
 })
 
 test('an agent with the token gets the same tools the stdio process offers', async () => {
@@ -135,7 +169,21 @@ test('the dashboard config carries a working url and the token', async () => {
   const config = (await res.json()) as any
   assert.equal(config.mcpServers.atelier.type, 'http')
   assert.equal(config.mcpServers.atelier.url, URL)
-  assert.equal(config.mcpServers.atelier.headers.Authorization, 'Bearer test-token-not-a-real-one')
+  assert.equal(config.mcpServers.atelier.headers.Authorization, `Bearer ${token}`)
+})
+
+test('the config names a project, so one daemon hands out a different file per project', async () => {
+  const other = repo.createProject('Second')
+  const res = await fetch(`http://127.0.0.1:${PORT}/mcp.json?project=${other.slug}`)
+  const config = (await res.json()) as any
+  assert.equal(config.mcpServers.atelier.headers.Authorization, `Bearer ${other.token}`)
+  assert.notEqual(other.token, token)
+})
+
+test('an unknown project is a 404 rather than a config for whichever one is active', async () => {
+  const res = await fetch(`http://127.0.0.1:${PORT}/mcp.json?project=nothing-like-this`)
+  assert.equal(res.status, 404)
+  await res.text()
 })
 
 test('the config is not readable cross-origin, because it is a credential', async () => {

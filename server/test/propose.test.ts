@@ -1,10 +1,16 @@
 /**
- * The review pass, as a function.
+ * What a recording becomes, as a function.
  *
- * These tests are the specification for what a recording becomes. Every one of
- * them is a decision that used to be made by a language model reading a trace
- * and typing JSON, which meant it was made differently each time and only when
- * somebody remembered to ask.
+ * These tests are the specification. They used to describe a pass that
+ * *inferred* a workflow from a trace of clicks — which value varied, where a
+ * wait belonged, which click was incidental — and every one of those inferences
+ * has since been deleted, because the person recording now states each of them
+ * at the moment the answer is obvious to them and to nobody else.
+ *
+ * So what is left to test is the assembly, and it is worth testing precisely
+ * because it is the part nobody looks at again: the order of the selector list,
+ * the timeouts that make replay wait rather than race, the signature derived
+ * from the steps, and the two refusals.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,431 +20,242 @@ import { join } from 'node:path'
 
 process.env.ATELIER_HOME = mkdtempSync(join(tmpdir(), 'atelier-propose-'))
 
-const { proposeWorkflow } = await import('../src/core/propose.ts')
+const { proposeWorkflow, sampleInputs } = await import('../src/core/propose.ts')
 
-/** A recorded element, with the candidate list the recorder actually produces. */
-const el = (label: string, candidates: Array<[string, string, number]>) => ({
-  tag: 'button',
-  type: null,
-  label,
-  selectors: candidates.map(([strategy, value, score]) => ({ strategy, value, score })),
+const sel = (candidates: Array<[string, string, number]>) =>
+  candidates.map(([strategy, value, score]) => ({ strategy, value, score })) as never
+
+/** A step as the control panel sends it: an element the person pointed at, the
+ *  name they confirmed, and the action they chose. */
+const step = (over: Record<string, unknown> = {}) => ({
+  kind: 'click',
+  target: 'Generate',
+  identifier: { strategy: 'text', value: 'Generate', score: 96 },
+  selectors: sel([['id', '#go', 92]]),
+  ...over,
 })
 
-const typed = (label: string, value: string, extra: Record<string, unknown> = {}) => ({
-  kind: 'type',
-  element: { ...el(label, [['id', '#prompt', 92]]), tag: 'textarea' },
-  value,
-  ...extra,
-})
+const propose = (steps: unknown[], over: Record<string, unknown> = {}) =>
+  proposeWorkflow({
+    name: 'w',
+    origins: ['https://x.test'],
+    raw: { startUrl: 'https://x.test/start', steps: steps as never },
+    ...over,
+  })
+
+/* ------------------------------------------------------------- refusals */
 
 test('an empty recording is rejected rather than promoted to an empty workflow', () => {
-  assert.throws(
-    () => proposeWorkflow({ name: 'empty', origins: ['https://x.test'], raw: { actions: [] } }),
-    /nothing was recorded/i,
-  )
+  assert.throws(() => propose([]), /nothing was recorded/i)
 })
 
 test('a recording with no origin is rejected — an unscoped workflow is the one thing we never save', () => {
-  assert.throws(
-    () =>
-      proposeWorkflow({
-        name: 'no-origin',
-        origins: [],
-        raw: { actions: [{ kind: 'click', element: el('Go', [['id', '#go', 92]]) }] },
-      }),
-    /origin/i,
-  )
+  assert.throws(() => propose([step()], { origins: [] }), /origin/i)
 })
 
-test('selectors are ordered best-first so replay tries the most durable one', () => {
-  const wf = proposeWorkflow({
-    name: 'ordering',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        {
-          kind: 'click',
-          element: el('Send', [
-            ['xpath', '/html/body/div[1]/button', 30],
-            ['testid', '[data-testid="send"]', 98],
-            ['css', 'div > button', 40],
-          ]),
-        },
-      ],
-    },
-  })
-  assert.deepEqual(
-    wf.steps[0]!.selectors.map((s) => s.strategy),
-    ['testid', 'css', 'xpath'],
-  )
+/* ------------------------------------------------------------ selectors */
+
+test('the name the person confirmed leads the selector list', () => {
+  const wf = propose([
+    step({
+      identifier: { strategy: 'text', value: 'Generate', score: 96 },
+      selectors: sel([
+        ['css', 'div > button', 40],
+        ['testid', '[data-testid="go"]', 98],
+      ]),
+    }),
+  ])
+  const generate = wf.steps[1]!
+  assert.equal(generate.selectors[0]!.value, 'Generate')
+  assert.equal(generate.selectors[0]!.score, 96)
 })
 
-test('every candidate is kept, because the fallback list is what survives a redeploy', () => {
-  const wf = proposeWorkflow({
-    name: 'keep-all',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        {
-          kind: 'click',
-          element: el('Send', [
-            ['testid', '[data-testid="send"]', 98],
-            ['aria', '[aria-label="Send"]', 88],
-            ['xpath', '/html/body/button', 30],
-          ]),
-        },
-      ],
-    },
-  })
-  assert.equal(wf.steps[0]!.selectors.length, 3)
+test('every harvested candidate is kept below it, because the fallback list is what survives a redeploy', () => {
+  const wf = propose([
+    step({
+      selectors: sel([
+        ['css', 'div > button', 40],
+        ['testid', '[data-testid="go"]', 98],
+        ['xpath', '/html/body/button[1]', 30],
+      ]),
+    }),
+  ])
+  const strategies = wf.steps[1]!.selectors.map((s) => s.strategy)
+  assert.deepEqual(strategies, ['text', 'testid', 'css', 'xpath'])
 })
 
-test('a typed value becomes a {{placeholder}} and a declared input', () => {
-  // Typing something by hand during a recording is the signal that it is a
-  // value somebody supplies. Nothing is guessed from how long it is.
-  const wf = proposeWorkflow({
-    name: 'params',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        typed('Prompt', 'a watercolour of a harbour at dusk'),
-        { kind: 'click', element: el('Send', [['testid', '[data-testid="send"]', 98]]) },
-      ],
-    },
-  })
-  const typeStep = wf.steps.find((s) => s.kind === 'type')
-  assert.equal(typeStep!.value, '{{prompt}}')
-  assert.deepEqual(
-    wf.inputs.map((i) => i.name),
-    ['prompt'],
-  )
-  assert.equal(wf.inputs[0]!.required, true)
+test('a name that could not be turned into a selector is still the step name', () => {
+  const wf = propose([step({ identifier: null, target: 'the third thumbnail' })])
+  assert.equal(wf.steps[1]!.target, 'the third thumbnail')
+  assert.equal(wf.steps[1]!.selectors[0]!.strategy, 'id')
 })
 
-test('a short typed value is an input too — length was never the question', () => {
-  const wf = proposeWorkflow({
-    name: 'short',
-    origins: ['https://x.test'],
-    raw: { actions: [typed('Qty', '2'), { kind: 'click', element: el('Go', [['id', '#go', 92]]) }] },
-  })
-  assert.equal(wf.steps[0]!.value, '{{qty}}')
-  assert.deepEqual(wf.inputs.map((i) => i.name), ['qty'])
+test('a duplicate of the confirmed name is not kept twice', () => {
+  const wf = propose([
+    step({
+      identifier: { strategy: 'text', value: 'Generate', score: 96 },
+      selectors: sel([
+        ['text', 'Generate', 60],
+        ['id', '#go', 92],
+      ]),
+    }),
+  ])
+  const texts = wf.steps[1]!.selectors.filter((s) => s.strategy === 'text')
+  assert.equal(texts.length, 1)
+  assert.equal(texts[0]!.score, 96)
 })
 
-test('a password becomes a manual step that parks, and its value never reaches the workflow', () => {
-  const wf = proposeWorkflow({
-    name: 'secret',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'type', element: el('Password', [['name', '[name="pw"]', 80]]), value: null, secret: true },
-        { kind: 'click', element: el('Sign in', [['id', '#in', 92]]) },
-      ],
-    },
-  })
-  assert.equal(wf.steps[0]!.kind, 'manual')
-  assert.equal(wf.steps[0]!.value, undefined)
-  assert.match(JSON.stringify(wf), /^(?!.*"pw-value").*$/)
-  assert.match(wf.steps[0]!.note ?? '', /yourself/i)
-})
+/* ---------------------------------------------------------------- shape */
 
-test('a capture step gets a wait for its own target, so it cannot fire on a spinner', () => {
-  const wf = proposeWorkflow({
-    name: 'capture-wait',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'click', element: el('Generate', [['testid', '[data-testid="go"]', 98]]) },
-        {
-          kind: 'capture',
-          element: el('result', [['css', 'main img', 40]]),
-          capture: { as: 'image', attribute: 'src' },
-        },
-      ],
-    },
-  })
-  const cap = wf.steps.find((s) => s.kind === 'capture')!
-  assert.ok(cap.waitBefore, 'capture must wait for its target to exist')
-  assert.equal(cap.waitBefore!.kind, 'visible')
-  assert.ok(cap.timeoutMs >= 120000, 'a generation wait needs a generous timeout')
-})
-
-test('the step before a capture waits too — that is the "click generate and wait" the recorder cannot see', () => {
-  const wf = proposeWorkflow({
-    name: 'trigger-wait',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'click', element: el('Generate', [['testid', '[data-testid="go"]', 98]]) },
-        {
-          kind: 'capture',
-          element: el('result', [['css', 'main img', 40]]),
-          capture: { as: 'image' },
-        },
-      ],
-    },
-  })
-  const trigger = wf.steps[0]!
-  assert.equal(trigger.kind, 'click')
-  assert.ok(trigger.waitAfter, 'the trigger should wait for the result to appear')
-  assert.equal(trigger.waitAfter!.kind, 'visible')
-})
-
-test('a recorded wait gesture is carried through as a real wait condition', () => {
-  const wf = proposeWorkflow({
-    name: 'explicit-wait',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'click', element: el('Go', [['id', '#go', 92]]) },
-        { kind: 'wait', element: el('spinner', [['css', '.spinner', 40]]), wait: { kind: 'hidden' } },
-        { kind: 'click', element: el('Next', [['id', '#next', 92]]) },
-      ],
-    },
-  })
-  const wait = wf.steps.find((s) => s.kind === 'wait')!
-  assert.equal(wait.waitBefore!.kind, 'hidden')
-  assert.equal(wait.selectors.length, 0, 'a wait step acts on nothing; the condition carries the selector')
-})
-
-test('produces is inferred from what was captured', () => {
-  const image = proposeWorkflow({
-    name: 'p-image',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [{ kind: 'capture', element: el('r', [['css', 'img', 40]]), capture: { as: 'image' } }],
-    },
-  })
-  assert.equal(image.produces, 'image')
-
-  const textual = proposeWorkflow({
-    name: 'p-text',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [{ kind: 'capture', element: el('r', [['css', 'pre', 40]]), capture: { as: 'text' } }],
-    },
-  })
-  assert.equal(textual.produces, 'text')
-
-  const nothing = proposeWorkflow({
-    name: 'p-none',
-    origins: ['https://x.test'],
-    raw: { actions: [{ kind: 'click', element: el('Go', [['id', '#go', 92]]) }] },
-  })
-  assert.equal(nothing.produces, 'none')
-})
-
-test('the leading navigate is kept and later same-page navigates are dropped', () => {
-  const wf = proposeWorkflow({
-    name: 'nav',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'navigate', value: 'https://x.test/app', origin: 'https://x.test' },
-        { kind: 'click', element: el('Go', [['id', '#go', 92]]) },
-        { kind: 'navigate', value: 'https://x.test/app', origin: 'https://x.test' },
-      ],
-    },
-  })
-  assert.equal(wf.steps.filter((s) => s.kind === 'navigate').length, 1)
+test('the recording opens with where it started, so it does not assume the right tab is already open', () => {
+  const wf = propose([step()])
   assert.equal(wf.steps[0]!.kind, 'navigate')
+  assert.equal(wf.steps[0]!.value, 'https://x.test/start')
 })
 
-test('an element clicked with no usable selector is dropped rather than saved as a step that cannot run', () => {
-  const wf = proposeWorkflow({
-    name: 'unusable',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'click', element: { tag: 'div', label: null, selectors: [] } },
-        { kind: 'click', element: el('Go', [['id', '#go', 92]]) },
-      ],
-    },
-  })
-  assert.equal(wf.steps.length, 1)
-  assert.equal(wf.steps[0]!.note, 'Click Go')
+test('every step keeps the name it was given, which is what a workflow reads as when it breaks', () => {
+  const wf = propose([step({ target: 'Generate image' })])
+  assert.equal(wf.steps[1]!.target, 'Generate image')
+  assert.equal(wf.steps[1]!.note, 'Click Generate image')
 })
 
-test('steps carry readable notes, because a workflow is read by a human when it breaks', () => {
-  const wf = proposeWorkflow({
-    name: 'notes',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        typed('Prompt', 'a long piece of text that is obviously the thing you would want to vary'),
-        { kind: 'click', element: el('Send', [['testid', '[data-testid="send"]', 98]]) },
-      ],
-    },
-  })
-  assert.equal(wf.steps[0]!.note, 'Type the prompt into Prompt')
-  assert.equal(wf.steps[1]!.note, 'Click Send')
+test('every step gets a stable id, so one can be repaired or repointed in place', () => {
+  const wf = propose([step(), step({ target: 'Download' })])
+  const ids = new Set(wf.steps.map((s) => s.id))
+  assert.equal(ids.size, wf.steps.length)
+  assert.ok(wf.steps.every((s) => typeof s.id === 'string' && s.id.length > 10))
 })
 
 test('a proposal is saved as a draft workflow, never active — a human confirms before it can run', () => {
-  const wf = proposeWorkflow({
-    name: 'not-live',
-    origins: ['https://x.test'],
-    raw: { actions: [{ kind: 'click', element: el('Go', [['id', '#go', 92]]) }] },
-  })
-  assert.equal(wf.status, 'draft')
-})
-
-test('every step gets a stable id, so one can be edited or re-recorded in place', () => {
-  const wf = proposeWorkflow({
-    name: 'ids',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'click', element: el('A', [['id', '#a', 92]]) },
-        { kind: 'click', element: el('B', [['id', '#b', 92]]) },
-      ],
-    },
-  })
-  const ids = wf.steps.map((s) => s.id)
-  assert.equal(new Set(ids).size, ids.length)
-  assert.ok(ids.every(Boolean))
-})
-
-test('consecutive typing into the same field collapses to the last value', () => {
-  const target = el('Prompt', [['id', '#prompt', 92]])
-  const wf = proposeWorkflow({
-    name: 'debounce',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        { kind: 'type', element: target, value: 'half of the sentence' },
-        { kind: 'type', element: target, value: 'half of the sentence and the rest of it too' },
-        { kind: 'click', element: el('Send', [['id', '#send', 92]]) },
-      ],
-    },
-  })
-  const types = wf.steps.filter((s) => s.kind === 'type')
-  assert.equal(types.length, 1)
-  assert.equal(types[0]!.value, '{{prompt}}')
-  assert.equal(wf.inputs[0]!.name, 'prompt')
+  assert.equal(propose([step()]).status, 'draft')
 })
 
 test('origins are carried through exactly as recorded, not widened', () => {
   const wf = proposeWorkflow({
-    name: 'origins',
-    origins: ['https://a.test', 'https://b.test'],
-    raw: { actions: [{ kind: 'click', element: el('Go', [['id', '#go', 92]]) }] },
+    name: 'w',
+    origins: ['https://one.test'],
+    raw: { steps: [step()] as never },
   })
-  assert.deepEqual(wf.origins, ['https://a.test', 'https://b.test'])
+  assert.deepEqual(wf.origins, ['https://one.test'])
 })
 
-/* ------------------------------------------- kept values vs supplied ones */
+/* --------------------------------------------------------------- values */
 
-/** Typed into a named field of its own, so each one has a distinct target key.
- *  The shared `typed` helper above deliberately reuses one selector, which is
- *  what makes it useful for the collapsing test and useless for this group. */
-const into = (label: string, id: string, value: string, extra: Record<string, unknown> = {}) => ({
-  kind: 'type',
-  element: { tag: 'textarea', type: null, label, selectors: [{ strategy: 'id', value: id, score: 92 }] },
-  value,
-  ...extra,
+test('a dynamic value becomes a {{placeholder}} and a declared input', () => {
+  const wf = propose([
+    step({
+      kind: 'type',
+      target: 'Prompt',
+      valueMode: 'dynamic',
+      sampleValue: 'a rope bridge',
+      inputName: 'prompt',
+    }),
+  ])
+  assert.equal(wf.steps[1]!.value, '{{prompt}}')
+  assert.deepEqual(
+    wf.inputs.map((i) => i.name),
+    ['prompt'],
+  )
 })
 
-const LONG_CONSTANT =
-  'You are a careful assistant. Answer in plain language, never invent a citation, and keep every reply under two paragraphs.'
-
-test('every typed field is an input, however many there are', () => {
-  const wf = proposeWorkflow({
-    name: 'several',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        into('Prompt', '#prompt', 'a harbour at dusk'),
-        into('Aspect ratio', '#ratio', '16:9'),
-        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
-      ],
-    },
-  })
-  assert.deepEqual(wf.inputs.map((i) => i.name), ['prompt', 'aspect_ratio'])
-  assert.equal(wf.steps.find((s) => s.note?.includes('Prompt'))!.value, '{{prompt}}')
-  assert.equal(wf.steps.find((s) => s.note?.includes('Aspect'))!.value, '{{aspect_ratio}}')
+test('a dynamic value keeps the text that was actually typed, for a test run', () => {
+  const wf = propose([
+    step({ kind: 'type', target: 'Prompt', valueMode: 'dynamic', sampleValue: 'a rope bridge' }),
+  ])
+  assert.equal(wf.steps[1]!.sampleValue, 'a rope bridge')
+  assert.deepEqual(sampleInputs(wf), { prompt: 'a rope bridge' })
 })
 
-test('a field kept as a static value is replayed exactly, and asks for nothing', () => {
-  // The one thing the person has to say: this text is setup, not a value. It is
-  // said by ticking the field in the panel, and the text they typed is what is
-  // kept.
-  const wf = proposeWorkflow({
-    name: 'kept',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        into('Instructions', '#sys', LONG_CONSTANT, { role: 'fixed' }),
-        into('Prompt', '#prompt', 'a harbour at dusk'),
-        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
-      ],
-    },
-  })
-  assert.equal(wf.steps.find((s) => s.note?.includes('Instructions'))!.value, LONG_CONSTANT)
-  assert.deepEqual(wf.inputs.map((i) => i.name), ['prompt'])
+test('a static value is replayed exactly and is not one of the inputs', () => {
+  const wf = propose([
+    step({ kind: 'type', target: 'System prompt', valueMode: 'static', sampleValue: 'be terse' }),
+  ])
+  assert.equal(wf.steps[1]!.value, 'be terse')
+  assert.deepEqual(wf.inputs, [])
 })
 
-test('length decides nothing — the long field is the input if it was not kept', () => {
-  // The old rule made the longest typed value the parameter, which inverted
-  // exactly this case: a long constant typed once as setup became the thing the
-  // caller had to supply, and the short thing that actually varies was frozen.
-  const wf = proposeWorkflow({
-    name: 'not-length',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        into('Instructions', '#sys', LONG_CONSTANT),
-        into('Seed', '#seed', '4471', { role: 'fixed' }),
-        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
-      ],
-    },
-  })
-  assert.deepEqual(wf.inputs.map((i) => i.name), ['instructions'])
-  assert.equal(wf.steps.find((s) => s.note?.includes('Seed'))!.value, '4471')
+test('an input name is derived from what the person called the field', () => {
+  const wf = propose([
+    step({ kind: 'type', target: 'Search query', valueMode: 'dynamic', sampleValue: 'x' }),
+  ])
+  assert.deepEqual(
+    wf.inputs.map((i) => i.name),
+    ['search_query'],
+  )
 })
 
-test('a workflow can keep every value and take nothing at all', () => {
-  const wf = proposeWorkflow({
-    name: 'all-kept',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        into('Instructions', '#sys', LONG_CONSTANT, { role: 'fixed' }),
-        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
-      ],
-    },
-  })
-  assert.equal(wf.inputs.length, 0, 'a workflow that takes nothing is a valid workflow')
-  assert.equal(wf.steps[0]!.value, LONG_CONSTANT)
+test('length decides nothing — a long dynamic value and a short static one both do as they were told', () => {
+  const wf = propose([
+    step({ kind: 'type', target: 'Style', valueMode: 'static', sampleValue: 'x'.repeat(400) }),
+    step({ kind: 'type', target: 'Prompt', valueMode: 'dynamic', sampleValue: 'a cat' }),
+  ])
+  assert.equal(wf.steps[1]!.value, 'x'.repeat(400))
+  assert.equal(wf.steps[2]!.value, '{{prompt}}')
+  assert.deepEqual(
+    wf.inputs.map((i) => i.name),
+    ['prompt'],
+  )
 })
 
-test('keeping a value survives going back to correct a typo in it', () => {
-  const wf = proposeWorkflow({
-    name: 'collapse-role',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        into('Instructions', '#sys', 'You are a careful', { role: 'fixed' }),
-        into('Instructions', '#sys', LONG_CONSTANT),
-        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
-      ],
-    },
-  })
-  assert.equal(wf.inputs.length, 0, 'the mark is on the field, not on one keystroke burst')
-  assert.equal(wf.steps[0]!.value, LONG_CONSTANT, 'and the last value typed is the one kept')
+test('a workflow can take nothing at all', () => {
+  const wf = propose([step({ kind: 'type', target: 'Prompt', valueMode: 'static', sampleValue: 'fixed' })])
+  assert.deepEqual(wf.inputs, [])
+  assert.deepEqual(sampleInputs(wf), {})
 })
 
-test('a password is never an input — its value was never recorded', () => {
-  const wf = proposeWorkflow({
-    name: 'secret-not-input',
-    origins: ['https://x.test'],
-    raw: {
-      actions: [
-        into('Password', '#pw', 'hunter2', { secret: true }),
-        into('Prompt', '#prompt', 'a harbour at dusk'),
-        { kind: 'click', element: el('Run', [['id', '#run', 92]]) },
-      ],
-    },
-  })
-  assert.deepEqual(wf.inputs.map((i) => i.name), ['prompt'])
+test('two fields with the same name are one input, not two', () => {
+  const wf = propose([
+    step({ kind: 'type', target: 'Prompt', valueMode: 'dynamic', sampleValue: 'a' }),
+    step({ kind: 'type', target: 'Prompt', valueMode: 'dynamic', sampleValue: 'b' }),
+  ])
+  assert.equal(wf.inputs.length, 1)
+})
+
+/* -------------------------------------------------------------- secrets */
+
+test('a password becomes a step that parks, and its value never reaches the workflow', () => {
+  const wf = propose([
+    step({ kind: 'manual', target: 'Password', secret: true, sampleValue: 'hunter2' }),
+  ])
+  const manual = wf.steps[1]!
+  assert.equal(manual.kind, 'manual')
+  assert.ok(!JSON.stringify(wf).includes('hunter2'))
+  assert.match(manual.note!, /never records one/i)
+})
+
+/* ------------------------------------------------------ waits and waits */
+
+test('a capture waits for its own target, so it cannot fire on a spinner', () => {
+  const wf = propose([step({ kind: 'capture', target: 'Result', capture: { as: 'image' } })])
+  const capture = wf.steps[1]!
+  assert.equal(capture.waitBefore?.kind, 'visible')
+  assert.equal(capture.timeoutMs, 180_000)
+})
+
+test('a recorded wait is carried through as a real wait condition', () => {
+  const wf = propose([step({ kind: 'wait', target: 'Spinner', wait: { kind: 'hidden' } })])
+  const wait = wf.steps[1]!
+  assert.equal(wait.waitBefore?.kind, 'hidden')
+  // The condition carries the selector; the step itself acts on nothing.
+  assert.deepEqual(wait.selectors, [])
+  assert.match(wait.note!, /to go/i)
+})
+
+test('an ordinary step is patient too, because a page changes a variable moment after the last one', () => {
+  const wf = propose([step()])
+  assert.equal(wf.steps[1]!.timeoutMs, 30_000)
+})
+
+/* ------------------------------------------------------------- produces */
+
+test('produces is taken from what was captured', () => {
+  assert.equal(propose([step({ kind: 'capture', capture: { as: 'image' } })]).produces, 'image')
+  assert.equal(propose([step({ kind: 'capture', capture: { as: 'text' } })]).produces, 'text')
+  assert.equal(propose([step({ kind: 'capture', capture: { as: 'download' } })]).produces, 'file')
+  assert.equal(propose([step()]).produces, 'none')
+})
+
+test('an unknown action from a newer extension is treated as a click rather than fatal', () => {
+  const wf = propose([step({ kind: 'teleport' })])
+  assert.equal(wf.steps[1]!.kind, 'click')
 })

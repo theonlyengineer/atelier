@@ -166,6 +166,7 @@ export function buildServer(session: Session): McpServer {
               ? `\n\nBlocked and waiting for a human:\n` +
                 blocked.map((j: any) => `  ${j.workflowName}: ${j.blockedReason}`).join('\n')
               : '') +
+            (o.counts.disabled ? `\nDisabled: ${o.counts.disabled} — not listed and cannot run` : '') +
             (o.pendingActivation?.length
               ? `\n\nRecorded and awaiting the human's confirmation in the popup:\n` +
                 o.pendingActivation.map((n: string) => `  ${n}`).join('\n')
@@ -177,7 +178,7 @@ export function buildServer(session: Session): McpServer {
         )
       } catch (e) {
         return fail(
-          `The Atelier daemon is not reachable: ${(e as Error).message}\nAsk the human to run \`npm start\` in atelier/, or check ~/.atelier/atelierd.log.`,
+          `The Atelier daemon is not reachable: ${(e as Error).message}\nAsk the human to start it — \`docker compose up -d\` in the Atelier checkout, or \`npm start\` — or to check ~/.atelier/atelierd.log.`,
         )
       }
     },
@@ -188,7 +189,7 @@ export function buildServer(session: Session): McpServer {
     {
       title: 'List browser workflows',
       description:
-        'List the recorded browser workflows this machine can replay, with the inputs each takes and what it produces. Call this before run_workflow — workflow names are per-machine and are not guessable. If nothing here produces what you need, say so rather than inventing a name; the human records new workflows in the browser extension.',
+        'List the browser workflows this project can replay, with the inputs each takes and what it produces. Call this before run_workflow — workflow names are per-project and are not guessable. Disabled workflows are not listed and cannot run. If nothing here produces what you need, say so rather than inventing a name; the human records new workflows in the browser extension.',
       inputSchema: {},
     },
     async () => {
@@ -197,7 +198,7 @@ export function buildServer(session: Session): McpServer {
       })
       if (!workflows.length) {
         return text(
-          'No active workflows. The human records one by clicking "Record a workflow" in the Atelier popup; Atelier turns the recording into a workflow by itself, and they confirm it there. Nothing is needed from you.',
+          'No active workflows in this project. The human records one from the Atelier popup: they point at each element in turn, say what to call it and which action to perform, and Atelier does the clicking. Then they activate it. Nothing is needed from you.',
         )
       }
       const lines = workflows.map((w) => {
@@ -226,7 +227,7 @@ export function buildServer(session: Session): McpServer {
           .record(z.string())
           .optional()
           .describe(
-            'Values for the workflow\'s inputs, matching the input names from list_workflows. Long-form values are composed by you and passed whole — the workflow types whatever string it is given and applies no formatting, templating or house style of its own.',
+            'Values for the workflow\'s inputs, matching the input names from list_workflows. Long-form values are composed by you and passed whole — the workflow types whatever string it is given and applies no formatting, templating or house style of its own. Fields the human marked as setup are not listed here and are replayed exactly; you neither see nor supply them.',
           ),
         wait_seconds: z
           .number()
@@ -278,6 +279,89 @@ export function buildServer(session: Session): McpServer {
       return text(
         `Job ${job.id} done. Produced:\n${lines.join('\n')}\n\nUse save_asset to write one into the repo.`,
       )
+    },
+  )
+
+  server.registerTool(
+    'test_workflow',
+    {
+      title: 'Run a workflow with the values it was recorded with',
+      description:
+        'Replay a workflow using the text the human typed while recording it, rather than values you supply. The way to answer "does this still work" without inventing a plausible-looking input — a test that types something nobody ever typed is testing a different workflow. Works on a draft too, which is how a workflow is checked before it is allowed to run. Produces a real asset, so do not use it in place of run_workflow when you actually want a result.',
+      inputSchema: { name: z.string().describe('Workflow name.') },
+    },
+    async ({ name }) => {
+      try {
+        const { job } = await call<{ job: Job }>('/api/workflows.test', { name })
+        return text(
+          `Test run ${job.id} queued for "${name}" with its recorded values. Check job_status for how it went.`,
+        )
+      } catch (e) {
+        return fail((e as Error).message)
+      }
+    },
+  )
+
+  server.registerTool(
+    'set_workflow_status',
+    {
+      title: 'Enable or disable a workflow',
+      description:
+        'Turn a workflow off without deleting it, or back on. A disabled workflow does not appear in list_workflows and refuses to run, but keeps its steps, its history and its health — which is what you want when a site has changed and the workflow is broken for now. Ask the human before disabling something: they recorded it by hand, and the reason it just failed may be a login rather than the workflow.',
+      inputSchema: {
+        name: z.string(),
+        status: z
+          .enum(['draft', 'active', 'disabled'])
+          .describe('active = runnable, disabled = off but kept, draft = awaiting the human.'),
+      },
+    },
+    async ({ name, status }) => {
+      try {
+        const { workflow } = await call<{ workflow: Workflow }>('/api/workflows.setStatus', {
+          name,
+          status,
+        })
+        return text(`"${workflow.name}" is now ${workflow.status}.`)
+      } catch (e) {
+        return fail((e as Error).message)
+      }
+    },
+  )
+
+  server.registerTool(
+    'set_step_value',
+    {
+      title: 'Change whether a step asks for its value',
+      description:
+        "Switch one typing step between static — the recorded text, replayed exactly, which you never see or supply — and dynamic, a named input you pass on every run. Also sets the text a test run types. The only edit a recorded workflow takes: what a step *does* is what the human demonstrated and is not changeable, here or anywhere. Use it when a workflow turns out to freeze the one thing that should vary. Two dynamic steps cannot share a name, compared on what the name becomes — \"Same text\", \"SAME Text\" and \"same_text\" are one name — because the caller passes one value and both fields would receive it.",
+      inputSchema: {
+        name: z.string().describe('Workflow name.'),
+        stepId: z.string().describe('Step id, from get_workflow.'),
+        valueMode: z.enum(['static', 'dynamic']).optional(),
+        sampleValue: z
+          .string()
+          .optional()
+          .describe('What a test run types here. Kept for a dynamic step too.'),
+        inputName: z
+          .string()
+          .optional()
+          .describe('For a dynamic step: the name the caller passes the value under.'),
+      },
+    },
+    async ({ name, stepId, valueMode, sampleValue, inputName }) => {
+      try {
+        const { workflow } = await call<{ workflow: Workflow }>('/api/workflows.setStepValue', {
+          name,
+          stepId,
+          valueMode,
+          sampleValue,
+          inputName,
+        })
+        const inputs = workflow.inputs.map((i) => i.name).join(', ') || '(none)'
+        return text(`Updated step ${stepId} in "${workflow.name}". It now takes: ${inputs}`)
+      } catch (e) {
+        return fail((e as Error).message)
+      }
     },
   )
 
@@ -512,7 +596,7 @@ export function buildServer(session: Session): McpServer {
     {
       title: 'Fix one step of a workflow',
       description:
-        "Replace one step's selectors, typed value, wait or timeout, leaving the rest of the workflow alone. The repair path for a workflow whose page moved — re-recording twenty steps to fix one is the thing this avoids. Health for that step is cleared, since a match recorded against the old selectors says nothing about the new ones. If the element cannot be identified from what you know, ask the human to re-record just that step from the popup instead of guessing a selector.",
+        "Replace one step's selectors, wait or timeout, leaving the rest of the workflow alone. The repair path for a workflow whose page moved — re-recording twenty steps to fix one is the thing this avoids. Health for that step is cleared, since a match recorded against the old selectors says nothing about the new ones. Prefer asking the human to repoint that one step from the popup: they can see the page and you are guessing at a selector. To change a value rather than how the step finds its element, use set_step_value.",
       inputSchema: {
         name: z.string().describe('Workflow name.'),
         stepId: z.string().describe('Step id, from workflow_health or get_workflow.'),
@@ -567,7 +651,7 @@ export function buildServer(session: Session): McpServer {
     {
       title: 'List recordings awaiting review',
       description:
-        'Raw browser recordings, kept as the record of what was actually captured. A recording is turned into a workflow automatically when it is saved and the human confirms it in the popup, so this is for inspection and recovery — not a queue you are expected to work through. Reach for it when a workflow came out wrong and you want to see what the recorder actually saw.',
+        'Raw browser recordings, kept as the record of exactly what the human built. A recording becomes a workflow the moment it is saved, so this is for inspection and recovery — not a queue you are expected to work through. Reach for it when a workflow came out wrong and you want to see what was actually recorded.',
       inputSchema: {},
     },
     async () => {
@@ -584,7 +668,7 @@ export function buildServer(session: Session): McpServer {
     {
       title: 'Read a recording',
       description:
-        'The raw captured action trace, with every selector candidate the recorder found per element. Use it to diagnose a workflow that came out wrong: compare what was recorded against what the proposal made of it. The proposal rules are fixed and deterministic, so if the trace is right and the workflow is not, the rules are the bug.',
+        'The recorded steps, each with the name the human confirmed for its element and every selector candidate found alongside it. Use it to diagnose a workflow that came out wrong: compare what was recorded against what the proposal made of it. The proposal is fixed and deterministic, so if the recording is right and the workflow is not, the rules are the bug.',
       inputSchema: { id: z.string() },
     },
     async ({ id }) => {
@@ -605,15 +689,45 @@ export function buildServer(session: Session): McpServer {
 
   const stepSchema = z.object({
     id: z.string(),
-    kind: z.enum(['navigate', 'click', 'type', 'select', 'upload', 'key', 'scroll', 'wait', 'capture', 'manual']),
+    kind: z.enum([
+      'navigate',
+      'click',
+      'type',
+      'select',
+      'check',
+      'uncheck',
+      'upload',
+      'key',
+      'scroll',
+      'wait',
+      'capture',
+      'manual',
+    ]),
     selectors: z.array(selectorSchema).default([]),
+    target: z.string().optional().describe('What a person would call this element.'),
     value: z.string().optional(),
+    valueMode: z
+      .enum(['static', 'dynamic'])
+      .optional()
+      .describe('dynamic makes it a named input; static replays the recorded text and is never shown to a caller.'),
+    sampleValue: z.string().optional().describe('What a test run types here.'),
+    inputName: z.string().optional(),
     capture: z
-      .object({ as: z.enum(['image', 'text', 'download']), attribute: z.string().optional() })
+      .object({
+        as: z.enum(['image', 'text', 'download']),
+        attribute: z.string().optional(),
+        from: z.enum(['auto', 'text', 'value', 'placeholder']).optional(),
+      })
       .optional(),
     waitBefore: z.any().optional(),
     waitAfter: z.any().optional(),
-    timeoutMs: z.number().int().min(100).max(600_000).default(15_000),
+    timeoutMs: z
+      .number()
+      .int()
+      .min(100)
+      .max(600_000)
+      .default(30_000)
+      .describe('How long to keep looking for the element. Replay retries until this runs out, which is what absorbs a page that changes a variable moment after the previous step.'),
     note: z.string().optional(),
   })
 
@@ -637,7 +751,7 @@ export function buildServer(session: Session): McpServer {
     {
       title: 'Turn a recording into a workflow',
       description:
-        'Overwrite the workflow a recording produced, with one you have written yourself. Rarely needed — a recording is proposed automatically on save. Use it when the automatic proposal got something wrong that you cannot fix with repair_step. Keep more than one selector per step: replay tries them in score order, and that list is what makes a workflow survive a redeploy.',
+        'Overwrite the workflow a recording produced, with one you have written yourself. Rarely needed — the recording is already the human\'s own description of each step. Use it when the proposal got something wrong that neither repair_step nor set_step_value can fix. Keep more than one selector per step: replay tries them in score order, and that list is what makes a workflow survive a redeploy.',
       inputSchema: { draftId: z.string(), workflow: workflowSchema },
     },
     async ({ draftId, workflow }) => {
@@ -676,7 +790,7 @@ export function buildServer(session: Session): McpServer {
     {
       title: 'Write a workflow by hand',
       description:
-        'Create or replace a whole workflow by hand, with no recording. For a site simple enough to describe directly. To fix one step of an existing workflow prefer repair_step, and to change how it finds an element prefer having the human re-record that step — the recorder captures selector candidates you cannot guess.',
+        'Create or replace a whole workflow by hand, with no recording. For a site simple enough to describe directly. To fix one step of an existing workflow prefer repair_step or set_step_value, and to change how it finds an element prefer having the human repoint that step — the recorder captures selector candidates you cannot guess.',
       inputSchema: { workflow: workflowSchema },
     },
     async ({ workflow }) => {

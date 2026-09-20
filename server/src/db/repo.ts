@@ -3,9 +3,10 @@
  * server deals in the shapes from types.ts and nothing else.
  */
 import { randomUUID } from 'node:crypto'
-import { open, nowIso } from './index.ts'
+import { newToken, open, nowIso } from './index.ts'
 import type { Asset, Job, JobStatus, Step, Workflow, WorkflowStatus } from '../types.ts'
 import type { StepMatch } from '../core/health.ts'
+import { askedName, inputsFrom, inputKey, inputNameFor, nameClash } from '../core/inputs.ts'
 
 /** node:sqlite rejects `undefined`; JSON round-trips turn absent fields into it. */
 const nz = <T>(v: T | undefined | null): T | null => (v === undefined ? null : v)
@@ -25,6 +26,8 @@ export interface Project {
   name: string
   slug: string
   note: string | null
+  /** The bearer token an agent presents on /mcp to work in this project. */
+  token: string
   createdAt: string
 }
 
@@ -33,6 +36,7 @@ const rowToProject = (r: Record<string, unknown>): Project => ({
   name: String(r.name),
   slug: String(r.slug),
   note: r.note ? String(r.note) : null,
+  token: String(r.token ?? ''),
   createdAt: String(r.created_at),
 })
 
@@ -130,8 +134,35 @@ export function createProject(name: string, note?: string): Project {
 
   const id = randomUUID()
   open()
-    .prepare(`INSERT INTO project (id, name, slug, note, created_at) VALUES (?, ?, ?, ?, ?)`)
-    .run(id, trimmed, slug, nz(note), nowIso())
+    .prepare(`INSERT INTO project (id, name, slug, note, token, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(id, trimmed, slug, nz(note), newToken(), nowIso())
+  return getProject(id)!
+}
+
+/**
+ * The project a bearer token belongs to.
+ *
+ * This is the whole of "which project is this agent working in": the token that
+ * got it through the door already says, so nothing downstream has to ask. A
+ * token that matches nothing returns null and the request is refused — there is
+ * no fallback to the active project, because an unknown credential resolving to
+ * *some* project is how one client's work ends up in another's.
+ */
+export function projectByToken(token: string): Project | null {
+  const trimmed = (token ?? '').trim()
+  if (!trimmed) return null
+  const r = open().prepare(`SELECT * FROM project WHERE token = ?`).get(trimmed) as
+    | Record<string, unknown>
+    | undefined
+  return r ? rowToProject(r) : null
+}
+
+/** Issue a new token, invalidating every config file carrying the old one. The
+ *  only way to revoke, which is why it is a deliberate button and not a sweep. */
+export function rotateProjectToken(id: string): Project {
+  const project = getProject(id)
+  if (!project) throw new Error(`no project ${id}`)
+  open().prepare(`UPDATE project SET token = ? WHERE id = ?`).run(newToken(), id)
   return getProject(id)!
 }
 
@@ -310,6 +341,7 @@ function rowToJob(r: Record<string, unknown>, assetIds: string[] = []): Job {
     blockedReason: r.blocked_reason ? String(r.blocked_reason) : null,
     error: r.error ? String(r.error) : null,
     assetIds,
+    isTest: Number(r.is_test ?? 0) === 1,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   }
@@ -319,7 +351,12 @@ const JOB_SELECT = `
   SELECT job.*, workflow.name AS workflow_name
   FROM job JOIN workflow ON workflow.id = job.workflow_id`
 
-export function createJob(workflowId: string, inputs: Record<string, string>, stepCount: number): Job {
+export function createJob(
+  workflowId: string,
+  inputs: Record<string, string>,
+  stepCount: number,
+  isTest = false,
+): Job {
   // A run belongs to its workflow's project, not to whatever is active now: a
   // job in flight must not change project because somebody switched the
   // dashboard while it was running.
@@ -328,9 +365,9 @@ export function createJob(workflowId: string, inputs: Record<string, string>, st
   const id = randomUUID()
   const at = nowIso()
   db.prepare(
-    `INSERT INTO job (id, project_id, workflow_id, inputs, status, step_index, step_count, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?)`,
-  ).run(id, owningProject, workflowId, JSON.stringify(inputs), stepCount, at, at)
+    `INSERT INTO job (id, project_id, workflow_id, inputs, status, step_index, step_count, is_test, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)`,
+  ).run(id, owningProject, workflowId, JSON.stringify(inputs), stepCount, isTest ? 1 : 0, at, at)
   return getJob(id)!
 }
 
@@ -566,14 +603,73 @@ export function replaceStep(workflowId: string, stepId: string, next: Partial<St
   return saveWorkflow({ ...wf, steps })
 }
 
-export function removeStep(workflowId: string, stepId: string): Workflow {
+/**
+ * Change one step's value, and nothing else.
+ *
+ * The one edit a workflow accepts after it is recorded. A step's *action* is
+ * what the person demonstrated and is not re-openable — changing "click" to
+ * "type" after the fact describes a workflow nobody ever performed. Its value
+ * is the opposite: whether the caller supplies it, and what a test run should
+ * type, are both things you find out later.
+ *
+ * Deliberately no selector change here: that is repair_step's job, and it has
+ * to clear the step's health where this must not.
+ */
+export function setStepValue(
+  workflowId: string,
+  stepId: string,
+  next: { valueMode?: Step['valueMode']; sampleValue?: string; inputName?: string },
+): Workflow {
   const wf = getWorkflow(workflowId)
   if (!wf) throw new Error(`no workflow ${workflowId}`)
-  const steps = wf.steps.filter((s) => s.id !== stepId)
-  if (steps.length === wf.steps.length) throw new Error(`workflow "${wf.name}" has no step ${stepId}`)
-  if (steps.length === 0) throw new Error('a workflow needs at least one step')
-  clearStepMatch(workflowId, stepId)
-  return saveWorkflow({ ...wf, steps })
+  const index = wf.steps.findIndex((s) => s.id === stepId)
+  if (index === -1) throw new Error(`workflow "${wf.name}" has no step ${stepId}`)
+  const step = wf.steps[index]!
+  if (step.kind !== 'type' && step.kind !== 'select') {
+    throw new Error('only a step that types or chooses something carries a value')
+  }
+
+  const mode = next.valueMode ?? step.valueMode ?? 'static'
+  const sample = next.sampleValue ?? step.sampleValue ?? ''
+  const name = inputKey(next.inputName ?? step.inputName ?? inputNameFor(step))
+
+  // Two dynamic fields cannot ask for the same value. Compared on what the name
+  // becomes rather than on what was typed: "Same text", "SAME Text" and
+  // "same_text" are one name, and an agent handed the workflow would see one
+  // input where the person thought they had made two.
+  if (mode === 'dynamic') {
+    if (!name) throw new Error('give the value a name the agent can pass it under')
+    const clash = nameClash(wf.steps, name, stepId)
+    if (clash) {
+      throw new Error(
+        `"${clash.target ?? clash.note ?? 'another step'}" already asks the agent for "${askedName(clash)}". ` +
+          'Two fields cannot share a name — the caller passes one value and both would get it. Give this one a different name.',
+      )
+    }
+  }
+
+  const merged: Step = {
+    ...step,
+    valueMode: mode,
+    sampleValue: sample,
+    ...(mode === 'dynamic' ? { inputName: name, value: `{{${name}}}` } : { value: sample }),
+  }
+  // A static step keeps no input name: leaving one behind would put a phantom
+  // input in the workflow's signature that nothing ever fills.
+  if (mode === 'static') delete merged.inputName
+
+  const steps = [...wf.steps]
+  steps[index] = merged
+  return saveWorkflow({ ...wf, steps, inputs: inputsFrom(steps) })
+}
+
+export function setWorkflowStatus(id: string, status: WorkflowStatus): Workflow {
+  const wf = getWorkflow(id)
+  if (!wf) throw new Error(`no workflow ${id}`)
+  if (status === 'active' && wf.steps.length === 0) {
+    throw new Error(`workflow "${wf.name}" has no steps to run`)
+  }
+  return saveWorkflow({ ...wf, status })
 }
 
 /* -------------------------------------------------------------- run history */

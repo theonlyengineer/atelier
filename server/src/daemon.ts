@@ -22,7 +22,6 @@ import {
   isLoopback,
   boundBeyondLoopback,
 } from './paths.ts'
-import { readOrCreateToken } from './core/token.ts'
 import { createMcpEndpoint } from './mcp/http.ts'
 import { open } from './db/index.ts'
 import * as repo from './db/repo.ts'
@@ -38,18 +37,23 @@ export const VERSION = '0.1.0'
 
 /**
  * The `.mcp.json` a person downloads from the dashboard and drops beside a
- * project on any machine that can reach this daemon.
+ * repository on any machine that can reach this daemon.
+ *
+ * It carries *a project's* token, which is the whole of the wiring: an agent
+ * that presents it is working in that project and never has to be told, so the
+ * question Atelier used to have to ask — "which project is this?" — is answered
+ * by the file being where it is.
  *
  * The URL is written as loopback because that is what the supplied compose file
  * publishes; point it somewhere else by hand if the daemon is somewhere else.
  */
-export function mcpConfig(port: number): unknown {
+export function mcpConfig(port: number, token: string): unknown {
   return {
     mcpServers: {
       atelier: {
         type: 'http',
         url: `http://127.0.0.1:${port}/mcp`,
-        headers: { Authorization: `Bearer ${readOrCreateToken()}` },
+        headers: { Authorization: `Bearer ${token}` },
       },
     },
   }
@@ -63,17 +67,6 @@ const log = (...parts: unknown[]) => {
     /* logging must never take the daemon down */
   }
   if (process.env.ATELIER_VERBOSE) process.stderr.write(line)
-}
-
-/** Last N log lines, cheaply. The file is small and rotated by nothing, so a
- *  full read is fine at the sizes this reaches in practice. */
-function tailLog(lines: number): string {
-  try {
-    if (!existsSync(LOG_FILE)) return ''
-    return readFileSync(LOG_FILE, 'utf-8').trimEnd().split('\n').slice(-lines).join('\n')
-  } catch {
-    return ''
-  }
 }
 
 function readJson(req: IncomingMessage, limitBytes = 8 * 1024 * 1024): Promise<any> {
@@ -136,11 +129,32 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
   let deps: ApiDeps
   const startedAt = Date.now()
 
-  /** Everything the dashboard renders, in one snapshot. */
+  /**
+   * Everything the dashboard renders, in one snapshot.
+   *
+   * Every list in here is already scoped to one project by the repo layer, so
+   * the page is a view of a project rather than of the machine. The project
+   * list itself is the one exception, because choosing between them is the one
+   * thing you cannot do from inside one.
+   */
   const overview = () => ({
     version: VERSION,
-    projects: repo.listProjects().map((p) => ({ ...p, contents: repo.projectContents(p.id) })),
-    activeProject: repo.activeProject(),
+    // The token is deliberately not on the project rows: this payload is
+    // streamed to every open dashboard tab, and a credential does not belong in
+    // something that broad. The Connect tab fetches it for one project, when
+    // somebody asks for it.
+    projects: repo.listProjects().map((p) => ({
+      id: p.id,
+      name: p.name,
+      slug: p.slug,
+      note: p.note,
+      createdAt: p.createdAt,
+      contents: repo.projectContents(p.id),
+    })),
+    activeProject: (() => {
+      const p = repo.activeProject()
+      return { id: p.id, name: p.name, slug: p.slug, note: p.note }
+    })(),
     port,
     home: HOME,
     uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
@@ -164,10 +178,30 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
         origins: w.origins,
         steps: w.steps.length,
         inputs: w.inputs,
-        // The panel needs the steps themselves to offer a repair, and the
-        // dashboard needs the health to show what is rotting.
-        stepList: w.steps.map((step) => ({ id: step.id, kind: step.kind, note: step.note ?? step.kind })),
-        health: { state: health.state, summary: health.summary, degraded: health.degraded },
+        // The whole step, not a summary of it. The dashboard's workflow page
+        // shows each step's target, action and value and lets the value be
+        // edited, and the popup needs enough to offer a repair — one shape that
+        // serves both beats two that drift.
+        stepList: w.steps.map((step) => ({
+          id: step.id,
+          kind: step.kind,
+          note: step.note ?? step.kind,
+          target: step.target ?? null,
+          valueMode: step.valueMode ?? null,
+          sampleValue: step.sampleValue ?? null,
+          inputName: step.inputName ?? null,
+          capture: step.capture ?? null,
+          matchedOn: (step.selectors[0]?.strategy ?? null) as string | null,
+        })),
+        // `steps` as well as `degraded`: the workflow's own page shows what
+        // every step is matching on, and a page that only names the sick ones
+        // cannot say that the rest are fine.
+        health: {
+          state: health.state,
+          summary: health.summary,
+          degraded: health.degraded,
+          steps: health.steps,
+        },
         runs,
       }
     })
@@ -200,13 +234,11 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     })),
     counts: {
       workflows: repo.listWorkflows('active').length,
+      disabled: repo.listWorkflows('disabled').length,
       drafts: repo.listDrafts(true).length,
       assets: repo.listAssets(1000).length,
       jobs: repo.listJobs(undefined, 1000).length,
     },
-    // The last few lines are almost always what you want when something is
-    // wrong, and opening a file is one step too many at that moment.
-    log: tailLog(40),
   })
 
   /** Dashboard connections. Separate from the extension hub: these are
@@ -285,21 +317,38 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     // to spawn. The token is the boundary here: inside a container the remote
     // address check above is off, and this is the one endpoint that can drive a
     // browser.
+    //
+    // It is also the wiring. A token belongs to exactly one project, so the
+    // credential that opens the door also says which room — and the session is
+    // bound to it before the agent's first tool call. There is no fallback to
+    // the daemon's active project: an unrecognised token resolving to *some*
+    // project is how one client's work ends up in another's.
     if (url.pathname === '/mcp') {
       const offered = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
-      if (offered !== readOrCreateToken()) {
-        return json(res, 401, { error: 'bad or missing token — see the dashboard for the .mcp.json' })
+      const project = repo.projectByToken(offered)
+      if (!project) {
+        return json(res, 401, {
+          error: 'bad or missing token — take the .mcp.json from the dashboard Connect tab',
+        })
       }
-      return mcp.handle(req, res)
+      return mcp.handle(req, res, project)
     }
 
-    // The config file the dashboard offers for download. It carries the token,
+    // The config file the dashboard offers for download. It carries a token,
     // so it is the one response that must not be readable cross-origin: the
     // wildcard set above would otherwise let any page the human visits read the
     // credential and drive their browser through it.
     if (url.pathname === '/mcp.json' && req.method === 'GET') {
       res.removeHeader('access-control-allow-origin')
-      const body = JSON.stringify(mcpConfig(port), null, 2) + '\n'
+      // Which project's config. The dashboard always names one; without a name
+      // the answer is the project it is showing, which is the only guess that
+      // cannot surprise anybody.
+      const asked = url.searchParams.get('project')
+      const project = asked
+        ? (repo.getProject(asked) ?? repo.getProjectBySlug(asked))
+        : repo.activeProject()
+      if (!project) return json(res, 404, { error: 'no such project' })
+      const body = JSON.stringify(mcpConfig(port, project.token), null, 2) + '\n'
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'content-length': Buffer.byteLength(body),

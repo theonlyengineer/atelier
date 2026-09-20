@@ -6,6 +6,10 @@
  * connection is treated as disposable — an alarm wakes us, we reconnect, and the
  * daemon re-sends the current step for any running job. Nothing is kept in
  * memory that cannot be rebuilt from a reconnect.
+ *
+ * Recording lives here too, and it is now a *directed* thing: the page asks us
+ * to append a step that the person composed, and we append it. We no longer
+ * watch them work and infer what they meant.
  */
 import { CANDIDATE_PORTS, MSG } from './protocol.js'
 
@@ -27,9 +31,6 @@ async function identity() {
   let { profileId, label } = stored
   if (!profileId) {
     profileId = crypto.randomUUID()
-    // A label the human recognises in the daemon log and in "waiting for X"
-    // messages. Chrome's signed-in email is the best automatic guess; the point
-    // is that nobody has to type it.
     // Deliberately not the signed-in email. Reading that needs the
     // `identity.email` permission, which is a real privacy ask for a label
     // nobody strictly needs — and an unused-looking permission is the first
@@ -76,7 +77,7 @@ async function connect() {
     log('connected to daemon on', port)
     send({ t: MSG.HELLO, profileId, label, browser: 'chrome' })
     flushPendingDrafts()
-    // Tell any open panel immediately, rather than making it wait for the
+    // Tell any open popup immediately, rather than making it wait for the
     // daemon's next state change — which, on an idle system, never comes.
     chrome.runtime.sendMessage({ t: 'panel.connection', connected: true }).catch(() => {})
   })
@@ -120,7 +121,7 @@ function send(msg) {
  *
  * Derived from the socket rather than from `port`, which only records that an
  * HTTP probe once succeeded — a single failed probe used to leave `port` null
- * while the socket was still open, and the panel would report "not connected"
+ * while the socket was still open, and the popup would report "not connected"
  * about a working connection.
  */
 function isConnected() {
@@ -238,8 +239,8 @@ function waitForLoad(tabId, timeoutMs = 30000) {
 async function runStep({ jobId, stepIndex, step, origins, workflowName }) {
   try {
     // The daemon enforces the allowlist, but the browser enforces the grant,
-    // and the grant is now per origin rather than the whole web. A workflow
-    // whose site was never approved parks with something the human can act on
+    // and the grant is per origin rather than the whole web. A workflow whose
+    // site was never approved parks with something the human can act on
     // instead of failing somewhere inside chrome.scripting.
     if (!(await hasOrigins(origins))) {
       send({
@@ -261,16 +262,7 @@ async function runStep({ jobId, stepIndex, step, origins, workflowName }) {
       return
     }
 
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['src/content/replay.js'],
-    })
-
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: (s) => window.__atelierReplay(s),
-      args: [step],
-    })
+    const result = await executeInTab(tab.id, step)
 
     if (!result?.ok) {
       send({
@@ -312,6 +304,25 @@ async function runStep({ jobId, stepIndex, step, origins, workflowName }) {
   }
 }
 
+/**
+ * Perform one step in a tab.
+ *
+ * The control panel performs a step the same way while it is being recorded —
+ * it calls the same `window.__atelierReplay` in the same isolated world, from
+ * inside the page rather than through here. That is the point: a step that
+ * cannot be performed is refused while somebody is still looking at the page,
+ * through exactly the code that will do it again next week.
+ */
+async function executeInTab(tabId, step) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['src/content/replay.js'] })
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (s) => window.__atelierReplay(s),
+    args: [step],
+  })
+  return result
+}
+
 async function upload(jobId, workflowName, capture) {
   let blob
   let mime = 'application/octet-stream'
@@ -341,13 +352,12 @@ async function upload(jobId, workflowName, capture) {
 /* ----------------------------------------------------------- permissions */
 
 /**
- * Atelier no longer asks for every site up front.
+ * Atelier never asks for every site up front.
  *
- * The origin allowlist has always been enforced by the daemon, but the manifest
- * still requested <all_urls>, so the browser had granted the extension the whole
- * web regardless — and the permission prompt is what a careful person actually
- * reads. Now the grant is requested per origin, at the moment the human points
- * at that site, and Chrome enforces what the security document promises.
+ * The origin allowlist has always been enforced by the daemon, but asking the
+ * browser for one origin at the moment the human points at that site is what
+ * makes the promise real — a permission prompt is the part a careful person
+ * actually reads.
  */
 const originPattern = (origin) => {
   try {
@@ -363,22 +373,10 @@ async function hasOrigins(origins) {
   return chrome.permissions.contains({ origins: patterns })
 }
 
-/** Ask for the origins a workflow needs. Must be called from a user gesture, so
- *  this is only ever reached from the panel or the page bar. */
-async function requestOrigins(origins) {
-  const patterns = origins.map(originPattern).filter(Boolean)
-  if (!patterns.length) return false
-  try {
-    return await chrome.permissions.request({ origins: patterns })
-  } catch {
-    return false
-  }
-}
-
 /* -------------------------------------------------------- daemon (HTTP) */
 
-/** The panel drives some things through the daemon's control API rather than
- *  the socket — anything that wants a reply the caller can act on. */
+/** Anything that wants a reply the caller can act on goes through the daemon's
+ *  control API rather than the socket. */
 async function daemon(path, body) {
   if (!port) port = await probePort()
   if (!port) return { error: 'the Atelier daemon is not running' }
@@ -404,9 +402,9 @@ async function daemon(path, body) {
  * MV3 terminates the service worker after ~30 seconds without events, and a
  * recording session is by definition time spent interacting with the *page* —
  * for image generation, most of it is spent waiting for a render. A module
- * variable is gone by the time you press Stop, and every captured action goes
- * with it, silently. Session storage survives the worker and dies with the
- * browser, which is exactly the lifetime a recording wants.
+ * variable is gone by the time you press Save, and every step goes with it,
+ * silently. Session storage survives the worker and dies with the browser,
+ * which is exactly the lifetime a recording wants.
  */
 const REC_KEY = 'atelier:recording'
 const PENDING_KEY = 'atelier:pendingDrafts'
@@ -419,34 +417,19 @@ async function getRecording() {
 async function setRecording(rec) {
   if (rec) await chrome.storage.session.set({ [REC_KEY]: rec })
   else await chrome.storage.session.remove(REC_KEY)
+  // Every surface reads the same object, so every surface is told when it
+  // changes rather than each keeping its own idea of the recording.
+  chrome.runtime.sendMessage({ t: 'panel.recording', recording: rec ?? null }).catch(() => {})
+  return rec
 }
 
-async function injectRecorder(tabId, draftName, mode = 'workflow', count = 0) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ['src/content/recorder.js'],
-  })
+async function injectPanel(tabId, rec) {
+  // replay.js first: the panel performs each step through it, so it has to be
+  // there before the first Add step.
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['src/content/replay.js'] })
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['src/content/recorder.js'] })
   await chrome.scripting.insertCSS({ target: { tabId }, files: ['src/content/overlay.css'] })
-  await chrome.tabs.sendMessage(tabId, { t: 'record.begin', draftName, mode, count })
-}
-
-async function startRecording(draftName) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-  if (!tab?.id) throw new Error('no active tab')
-  const origin = originOf(tab.url)
-  if (!origin) throw new Error('this page cannot be recorded — open the site you want to automate first')
-
-  // Ask for this one origin, now, while we are inside the click that started
-  // the recording. Recording a site we are not allowed to replay on would
-  // produce a workflow that can never run.
-  if (!(await hasOrigins([origin])) && !(await requestOrigins([origin]))) {
-    throw new Error(`Atelier needs permission for ${origin} to record here`)
-  }
-
-  await setRecording({ draftName, tabId: tab.id, actions: [], origins: [origin], mode: 'workflow' })
-  await injectRecorder(tab.id, draftName, 'workflow', 0)
-  log('recording started:', draftName)
-  reflect({ ...state })
+  await chrome.tabs.sendMessage(tabId, { t: 'record.begin', recording: rec })
 }
 
 const originOf = (url) => {
@@ -458,46 +441,193 @@ const originOf = (url) => {
   }
 }
 
-/** Re-record one step of an existing workflow, in place. The repair path: a page
- *  that moved needs one step fixed, not twenty re-recorded. */
-async function startStepRecording(workflowName, stepId) {
+/**
+ * Begin a recording with no name.
+ *
+ * The name is asked for in the page, not in the popup, because a popup closes
+ * the moment it loses focus and the first thing a person does after starting a
+ * recording is look at the page. The popup's job is to get out of the way.
+ */
+async function startRecording() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+  if (!tab?.id) throw new Error('no active tab')
+  const origin = originOf(tab.url)
+  if (!origin) throw new Error('this page cannot be recorded — open the site you want to automate first')
+  if (!(await hasOrigins([origin]))) {
+    throw new Error(`Atelier needs permission for ${origin} to record here`)
+  }
+
+  const rec = await setRecording({
+    mode: 'workflow',
+    name: '',
+    tabId: tab.id,
+    origins: [origin],
+    startUrl: tab.url,
+    steps: [],
+  })
+  await injectPanel(tab.id, rec)
+  log('recording started on', origin)
+  reflect({ ...state })
+  return { ok: true }
+}
+
+/** Point one step of an existing workflow at a new element. The repair path: a
+ *  page that moved needs one step re-aimed, not twenty re-recorded. */
+async function startRepoint(workflowName, stepId, stepNote) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (!tab?.id) return { error: 'no active tab' }
   const origin = originOf(tab.url)
-  if (!origin) return { error: 'open the workflow\'s site in this tab first' }
-  if (!(await hasOrigins([origin])) && !(await requestOrigins([origin]))) {
-    return { error: `Atelier needs permission for ${origin}` }
-  }
-  await setRecording({
-    draftName: workflowName,
+  if (!origin) return { error: "open the workflow's site in this tab first" }
+  if (!(await hasOrigins([origin]))) return { error: `Atelier needs permission for ${origin}` }
+
+  const rec = await setRecording({
+    mode: 'repoint',
+    name: workflowName,
     tabId: tab.id,
-    actions: [],
     origins: [origin],
-    mode: 'step',
+    steps: [],
     workflowName,
     stepId,
+    stepNote: stepNote ?? '',
   })
-  await injectRecorder(tab.id, workflowName, 'step', 0)
+  await injectPanel(tab.id, rec)
   reflect({ ...state })
   return { ok: true }
 }
 
-/** Splice the single re-recorded action into the workflow and stand down. */
-async function finishStepRecording() {
+async function finishRepoint(pick) {
   const rec = await getRecording()
-  if (!rec || rec.mode !== 'step') return { error: 'no step recording in progress' }
-  const action = rec.actions[rec.actions.length - 1]
+  if (!rec || rec.mode !== 'repoint') return { error: 'no repoint in progress' }
   await setRecording(null)
   reflect({ ...state })
-  if (!action) return { error: 'nothing was captured' }
-  send({ t: MSG.STEP_RERECORD, workflowName: rec.workflowName, stepId: rec.stepId, action })
-  log('re-recorded step', rec.stepId, 'of', rec.workflowName)
+  send({ t: MSG.STEP_REPOINT, workflowName: rec.workflowName, stepId: rec.stepId, pick })
+  log('repointed step', rec.stepId, 'of', rec.workflowName)
   return { ok: true }
 }
 
-/** Throw a recording away. Its own control, because the alternative — saving
- *  something you did not mean to keep and deleting it afterwards — leaves a
- *  half-made workflow in the list in the meantime. */
+async function setName(name) {
+  const rec = await getRecording()
+  if (!rec) return { error: 'no recording in progress' }
+  const clean = String(name ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+  if (!clean) return { error: 'a workflow needs a name — short and kebab-case' }
+  rec.name = clean
+  await setRecording(rec)
+  return { ok: true, name: clean }
+}
+
+/**
+ * What a name becomes once it is written down.
+ *
+ * Mirrored from server/src/core/inputs.ts, the way the wire protocol is — the
+ * extension has no build step and cannot import it. The rule is what makes two
+ * names the same name: "Same text", "SAME Text" and "same_text" all serialise
+ * to `same_text`, and a workflow with both would hand an agent one input where
+ * the person thought they had made two.
+ */
+const inputKey = (name) =>
+  String(name ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24)
+
+/** The name a step actually asks for, whichever way it was given one. */
+const askedName = (step) => inputKey(step.inputName) || inputKey(step.target)
+
+/**
+ * A step already asking for this name, if there is one.
+ *
+ * Refused rather than repaired: the caller passes one value per name, so two
+ * fields sharing one would both receive it — silently not what anybody drawing
+ * two boxes meant. The person is right there, and renaming is free.
+ */
+function nameClash(steps, name, exceptIndex = -1) {
+  const key = inputKey(name)
+  if (!key) return -1
+  return steps.findIndex(
+    (step, i) => i !== exceptIndex && step.valueMode === 'dynamic' && askedName(step) === key,
+  )
+}
+
+const clashMessage = (steps, at) =>
+  `Step ${at + 1}, "${steps[at].target || 'another field'}", already asks the agent for ` +
+  `"${askedName(steps[at])}". Two fields cannot share a name — the caller passes one value ` +
+  'and both would get it. Give this one a different name.'
+
+/**
+ * Append a step the person composed.
+ *
+ * Nothing is inferred and nothing is merged. They pointed at an element, said
+ * what to call it, and chose an action; this records exactly that. The previous
+ * recorder collapsed adjacent typing and guessed which value varied, which was
+ * the right thing to do with evidence that did not contain intent — and is the
+ * wrong thing to do now that it does.
+ */
+async function addStep(step) {
+  const rec = await getRecording()
+  if (!rec) return { error: 'no recording in progress' }
+  if (step.valueMode === 'dynamic') {
+    const name = step.inputName || step.target
+    if (!inputKey(name)) return { error: 'give the value a name the agent can pass it under' }
+    const at = nameClash(rec.steps, name)
+    if (at !== -1) return { error: clashMessage(rec.steps, at) }
+  }
+  rec.steps.push(step)
+  if (step.origin && !rec.origins.includes(step.origin)) rec.origins.push(step.origin)
+  await setRecording(rec)
+  return { ok: true, steps: rec.steps.length }
+}
+
+/**
+ * Change one step's value while still recording.
+ *
+ * The value is the only thing a recorded step lets you change — whether the
+ * caller supplies it, and what it says. The action is not re-openable, here or
+ * on the dashboard: a step you can rewrite into something nobody performed is a
+ * step nobody checked.
+ */
+async function setStepValue(index, patch) {
+  const rec = await getRecording()
+  if (!rec) return { error: 'no recording in progress' }
+  const step = rec.steps[index]
+  if (!step) return { error: 'no such step' }
+  if (step.kind !== 'type' && step.kind !== 'select') {
+    return { error: 'only a step that types or chooses something carries a value' }
+  }
+  if (step.secret) return { error: 'a password is never recorded, so it has no value to change' }
+
+  const mode = patch.valueMode ?? step.valueMode ?? 'static'
+  if (mode === 'dynamic') {
+    const name = patch.inputName ?? step.inputName ?? step.target
+    if (!inputKey(name)) return { error: 'give the value a name the agent can pass it under' }
+    const at = nameClash(rec.steps, name, index)
+    if (at !== -1) return { error: clashMessage(rec.steps, at) }
+  }
+
+  if (patch.valueMode) step.valueMode = patch.valueMode
+  if (typeof patch.sampleValue === 'string') step.sampleValue = patch.sampleValue
+  if (patch.inputName) step.inputName = patch.inputName
+  await setRecording(rec)
+  return { ok: true, step }
+}
+
+/** Throw every step away and start the same workflow again. The only way to
+ *  remove a step, deliberately: a recording you can edit in the middle is one
+ *  where the steps no longer describe anything that was actually performed. */
+async function restartRecording() {
+  const rec = await getRecording()
+  if (!rec) return { error: 'no recording in progress' }
+  const dropped = rec.steps.length
+  rec.steps = []
+  await setRecording(rec)
+  return { ok: true, dropped }
+}
+
+/** Throw a recording away entirely. */
 async function discardRecording() {
   const rec = await getRecording()
   if (!rec) return { error: 'no recording in progress' }
@@ -508,117 +638,21 @@ async function discardRecording() {
   }
   await setRecording(null)
   reflect({ ...state })
-  log('recording discarded:', rec.draftName)
-  return { ok: true, discarded: rec.actions.length }
-}
-
-/** Remove the last thing recorded. A recorder that cannot take something back
- *  makes you restart from the beginning over one stray click. */
-async function undoLastAction() {
-  const rec = await getRecording()
-  if (!rec) return 0
-  rec.actions.pop()
-  await setRecording(rec)
-  chrome.runtime.sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions } }).catch(() => {})
-  return rec.actions.length
-}
-
-/**
- * Mark a recorded field as the thing that varies between runs, or as setup to
- * be replayed exactly.
- *
- * The proposal pass guesses by taking the longest typed value, which is right
- * for the common recording and exactly wrong for one that types a long constant
- * into one field and a short varying thing into another — there is nothing in
- * the trace that distinguishes the two. Only the person doing the task knows,
- * and the moment they know it is while they are doing it, so the mark is made
- * against the list in the panel rather than asked for afterwards.
- */
-async function setActionRole(index, role) {
-  const rec = await getRecording()
-  if (!rec) return { error: 'no recording in progress' }
-  const action = rec.actions[index]
-  if (!action) return { error: 'no such action' }
-  if (action.kind !== 'type') return { error: 'only a typed field can be an input' }
-  if (action.secret) return { error: 'a password is never recorded, so it cannot be an input' }
-  // Clearing is a role of its own: it hands the field back to the guess rather
-  // than pinning it to whichever side the panel happened to show first.
-  if (role) action.role = role
-  else delete action.role
-  await setRecording(rec)
-  chrome.runtime
-    .sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions, mode: rec.mode } })
-    .catch(() => {})
-  return { ok: true, role: action.role ?? null }
-}
-
-/** The identity a field is known by, and the same one the proposal pass uses to
- *  collapse: the best selector it was recorded with. */
-function fieldKey(element) {
-  const best = [...(element?.selectors ?? [])].sort((a, b) => b.score - a.score)[0]
-  return best ? `${best.strategy}:${best.value}` : null
-}
-
-/**
- * Typing into the field you are already typing into is not another step.
- *
- * The recorder debounces per field, but any pause longer than the debounce emits
- * a second action — so a sentence with a thought in the middle of it arrived as
- * two, and going back to fix a word made three. `propose.ts` has always
- * collapsed those, but not until the recording became a workflow, which left
- * every screen before that — the count on the bar, the popup's list, the review
- * — showing bursts of keystrokes as if they were steps.
- *
- * Only against the immediately preceding action, which is what keeps this a
- * merge rather than a rewrite: type here, click there, type here again is three
- * things that happened, in the order replay has to follow them.
- */
-function mergesInto(previous, action) {
-  if (!previous || previous.kind !== 'type' || action.kind !== 'type') return false
-  if (previous.secret !== action.secret) return false
-  const key = fieldKey(action.element)
-  return key !== null && key === fieldKey(previous.element)
-}
-
-async function addAction(action) {
-  const rec = await getRecording()
-  if (!rec) return 0
-  const previous = rec.actions[rec.actions.length - 1]
-  if (mergesInto(previous, action)) {
-    // The later value is the complete one. The role is not: it was set against
-    // the field, and going back to correct a typo should not undo it.
-    rec.actions[rec.actions.length - 1] = { ...action, ...(previous.role ? { role: previous.role } : {}) }
-    if (action.origin && !rec.origins.includes(action.origin)) rec.origins.push(action.origin)
-    await setRecording(rec)
-    chrome.runtime
-      .sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions, mode: rec.mode } })
-      .catch(() => {})
-    return rec.actions.length
-  }
-  rec.actions.push(action)
-  if (action.origin && !rec.origins.includes(action.origin)) rec.origins.push(action.origin)
-  await setRecording(rec)
-  // Push the whole list, not a count. A recorder that only tells you how many
-  // things it heard cannot tell you it heard the wrong thing — which is how two
-  // recordings came back missing the step that mattered.
-  chrome.runtime
-    .sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions, mode: rec.mode } })
-    .catch(() => {})
-  return rec.actions.length
+  log('recording discarded:', rec.name)
+  return { ok: true, discarded: rec.steps.length }
 }
 
 async function saveRecording() {
   const rec = await getRecording()
-  if (!rec) {
-    log('stop requested with no recording in progress')
-    return { ok: false, error: 'no recording in progress' }
-  }
+  if (!rec) return { ok: false, error: 'no recording in progress' }
+  if (!rec.name) return { ok: false, error: 'name the workflow before saving it' }
+  if (!rec.steps.length) return { ok: false, error: 'add at least one step before saving' }
 
   const payload = {
     t: MSG.DRAFT_SAVE,
-    name: rec.draftName,
+    name: rec.name,
     origins: rec.origins,
-    raw: { actions: rec.actions, recordedAt: new Date().toISOString() },
+    raw: { startUrl: rec.startUrl, steps: rec.steps, recordedAt: new Date().toISOString() },
   }
 
   try {
@@ -631,7 +665,7 @@ async function saveRecording() {
 
   if (isConnected()) {
     send(payload)
-    log('draft saved:', rec.draftName, rec.actions.length, 'actions')
+    log('draft saved:', rec.name, rec.steps.length, 'steps')
   } else {
     // Never drop a recording because the daemon happened to be down. Queue it
     // and flush on the next connect — re-recording is the one cost the user
@@ -640,11 +674,11 @@ async function saveRecording() {
     const pending = bag[PENDING_KEY] ?? []
     pending.push(payload)
     await chrome.storage.session.set({ [PENDING_KEY]: pending })
-    log('daemon offline; queued draft:', rec.draftName)
+    log('daemon offline; queued draft:', rec.name)
   }
 
   reflect({ ...state })
-  return { ok: true, actions: rec.actions.length }
+  return { ok: true, steps: rec.steps.length, name: rec.name }
 }
 
 /** Send anything recorded while the daemon was unreachable. */
@@ -667,10 +701,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, info) => {
   const rec = await getRecording()
   if (!rec || rec.tabId !== tabId) return
   try {
-    await injectRecorder(tabId, rec.draftName, rec.mode ?? 'workflow', rec.actions.length)
-    log('re-attached recorder after navigation')
+    await injectPanel(tabId, rec)
+    log('re-attached the panel after navigation')
   } catch (e) {
-    log('could not re-attach recorder', e)
+    log('could not re-attach the panel', e)
   }
 })
 
@@ -707,19 +741,18 @@ async function route(msg, sendResponse) {
       try {
         await connect()
       } catch (e) {
-        // Never leave the panel awaiting a response it will not get: an
+        // Never leave the popup awaiting a response it will not get: an
         // unanswered sendMessage looks identical to "daemon is down".
         console.error('[atelier] connect failed', e)
       }
-      // The daemon only pushes state on change, so a panel opened during a
+      // The daemon only pushes state on change, so a popup opened during a
       // quiet period would otherwise render the worker's stale cache.
       if (isConnected()) send({ t: MSG.STATE_REQUEST })
-      // Read from session storage, not a module variable: the worker may have
-      // been recycled since the recording started.
-      const rec = await getRecording()
       sendResponse({
         state,
-        recording: rec ? { name: rec.draftName, actions: rec.actions, mode: rec.mode ?? 'workflow' } : null,
+        // Read from session storage, not a module variable: the worker may have
+        // been recycled since the recording started.
+        recording: await getRecording(),
         connected: isConnected(),
         port,
       })
@@ -734,61 +767,43 @@ async function route(msg, sendResponse) {
       sendResponse({ ok: true })
       break
     case 'panel.record.start':
-      await startRecording(msg.name)
-      sendResponse({ ok: true })
-      break
-    case 'panel.record.stop':
-      sendResponse(await saveRecording())
-      break
-    case 'record.action': {
-      // addAction persists to session storage. It used to be dead code behind a
-      // module variable that did not exist, which meant every recorded action
-      // threw and was silently dropped — the recording always came back empty.
-      const total = await addAction(msg.action)
-      sendResponse({ ok: true, count: total })
-      break
-    }
-    // The page asks for the recording so far, to review it before saving. The
-    // popup gets the same thing from panel.hello; this is the same read, asked
-    // for by the surface the person is actually looking at.
-    case 'record.list': {
-      const rec = await getRecording()
-      sendResponse(rec ? { name: rec.draftName, actions: rec.actions } : { error: 'no recording in progress' })
-      break
-    }
-    case 'record.role':
-      sendResponse(await setActionRole(msg.index, msg.role))
-      break
-    case 'record.undo': {
-      const total = await undoLastAction()
-      sendResponse({ ok: true, count: total })
-      break
-    }
-    case 'record.saveFromPage':
-      sendResponse(await saveRecording())
-      break
-    case 'record.discardFromPage':
-      sendResponse(await discardRecording())
-      break
-    case 'record.stepDone':
-      sendResponse(await finishStepRecording())
+      sendResponse(await startRecording())
       break
     case 'panel.record.discard':
       sendResponse(await discardRecording())
       break
-    case 'panel.step.rerecord':
-      sendResponse(await startStepRecording(msg.workflowName, msg.stepId))
+    case 'panel.step.repoint':
+      sendResponse(await startRepoint(msg.workflowName, msg.stepId, msg.stepNote))
       break
-    case 'panel.workflow.activate': {
-      const res = await daemon('/api/workflows.activate', { name: msg.name })
-      sendResponse(res)
+
+    /* ---- from the in-page control panel ---- */
+    case 'record.state':
+      sendResponse({ recording: await getRecording() })
       break
-    }
-    case 'panel.workflow.removeStep': {
-      const res = await daemon('/api/workflows.removeStep', { name: msg.name, stepId: msg.stepId })
-      sendResponse(res)
+    case 'record.name':
+      sendResponse(await setName(msg.name))
       break
-    }
+    case 'record.addStep':
+      sendResponse(await addStep(msg.step))
+      break
+    case 'record.setStepValue':
+      sendResponse(await setStepValue(msg.index, msg.patch ?? {}))
+      break
+    case 'record.restart':
+      sendResponse(await restartRecording())
+      break
+    case 'record.save':
+      sendResponse(await saveRecording())
+      break
+    case 'record.discard':
+      sendResponse(await discardRecording())
+      break
+    case 'record.repointDone':
+      sendResponse(await finishRepoint(msg.pick))
+      break
+    case 'panel.workflow.activate':
+      sendResponse(await daemon('/api/workflows.activate', { name: msg.name }))
+      break
     default:
       sendResponse({ ok: false })
   }

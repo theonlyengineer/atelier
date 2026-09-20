@@ -79,7 +79,25 @@ before(async () => {
   })
 })
 
+/**
+ * Every page this suite opens, so a failing test cannot take the rest with it.
+ *
+ * A dashboard page holds an SSE connection for as long as it is open, and a
+ * test that fails throws before its own page.close(). Six leaked pages is
+ * Chrome's per-origin connection cap on HTTP/1.1, at which point the next
+ * page load hangs for thirty seconds and fails — so one real failure presented
+ * as six, with the five downstream ones pointing nowhere useful.
+ */
+const opened: any[] = []
+
 after(async () => {
+  for (const page of opened) {
+    try {
+      if (!page.isClosed()) await page.close()
+    } catch {
+      /* already gone */
+    }
+  }
   await browser?.close()
   stop?.()
 })
@@ -88,6 +106,7 @@ const skip = { skip: CHROME ? false : 'no Chrome on this machine' }
 
 async function open() {
   const page = await browser.newPage()
+  opened.push(page)
   await page.setViewport({ width: 1000, height: 900 })
   // networkidle would never fire: the dashboard holds an SSE connection open.
   await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' })
@@ -147,14 +166,54 @@ test('a state is stated once, with the fix in one place', skip, async () => {
   await page.close()
 })
 
-test('the sidebar says what state the whole system is in', skip, async () => {
+test('the sidebar carries the sections of one project and nothing else', skip, async () => {
+  // It used to end in a status block reading ":7717 - up 33m - this browser".
+  // Every part of that was either invariant, uninteresting, or already said
+  // louder somewhere else: a detached browser is an attention card, which the
+  // test above pins. What is left at the foot of the column is the version,
+  // which is the one thing you genuinely cannot work out by looking.
   const page = await open()
-  const status = await page.evaluate(
-    `(() => { const el = document.querySelector('#sidestat'); return { cls: el.className, text: el.innerText.trim() } })()`,
+  assert.equal(await page.evaluate(`!!document.querySelector('#sidestat')`), false)
+
+  const tabs = (await page.evaluate(
+    `[...document.querySelectorAll('.nav [data-tab]')].map(b => b.dataset.tab)`,
+  )) as string[]
+  assert.deepEqual(tabs, ['overview', 'workflows', 'runs', 'assets', 'connect'])
+  // Projects is the frame, not a section of one project, so it lives up in the
+  // header beside the switcher.
+  assert.equal(await page.evaluate(`!!document.querySelector('.head [data-tab="projects"]')`), true)
+  assert.equal(await page.evaluate(`!!document.querySelector('.head .switcher')`), true)
+
+  const version = await page.evaluate(`document.querySelector('.side-version').textContent`)
+  assert.match(version as string, /^v\d/)
+  // And not next to the wordmark, where it read as part of the name.
+  assert.equal(
+    await page.evaluate(`document.querySelector('.brand').textContent.replace(/\\s+/g, ' ').trim()`),
+    'A Atelier',
   )
-  // No browser is attached in this fixture, so it is a warning, not "Ready".
-  assert.match(status.cls, /warn/)
-  assert.match(status.text, /browser/i)
+  await page.close()
+})
+
+test('the drawer collapses to icons, and remembers that it did', skip, async () => {
+  const page = await open()
+  const width = () => page.evaluate(`document.querySelector('.side').getBoundingClientRect().width`)
+  const open0 = (await width()) as number
+
+  await page.click('#drawer')
+  await new Promise((r) => setTimeout(r, 400))
+  const closed = (await width()) as number
+  assert.ok(closed < open0 / 2, 'collapsed to a strip of icons')
+  // Taken out of the layout, not merely hidden: a label that still occupies its
+  // row keeps the column as wide as its text and scrolls it sideways.
+  assert.equal(
+    await page.evaluate(`getComputedStyle(document.querySelector('.nav .label-text')).display`),
+    'none',
+  )
+
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(`document.querySelectorAll('.kpi').length > 0`, { timeout: 8000 })
+  assert.equal(await page.evaluate(`document.documentElement.dataset.drawer`), 'closed')
+  await page.evaluate(`localStorage.removeItem('atelier:drawer')`)
   await page.close()
 })
 
@@ -184,7 +243,7 @@ test('a live state frame does not snap the tab back under the reader', skip, asy
   // render() runs on every change and every 25 seconds regardless. Deriving the
   // visible tab from that data is the classic way a live page becomes unusable.
   const page = await open()
-  await page.evaluate(`location.hash = '#log'`)
+  await page.evaluate(`location.hash = '#assets'`)
   await new Promise((r) => setTimeout(r, 100))
 
   // Provoke a state push by mutating through the API.
@@ -193,8 +252,23 @@ test('a live state frame does not snap the tab back under the reader', skip, asy
   )
   await new Promise((r) => setTimeout(r, 1000))
 
-  assert.equal(await selected(page), 'log')
+  assert.equal(await selected(page), 'assets')
   await page.close()
+})
+
+test('there is no log section, and the daemon does not stream its log to the page', skip, async () => {
+  // It was a file tailed into a tab. Nobody reading a dashboard wants a log
+  // they cannot search, and the payload carried forty lines of it to every
+  // open tab on every state change. The file is still on disk, which is where
+  // a log belongs.
+  const page = await open()
+  assert.equal(await page.evaluate(`!!document.querySelector('[data-tab="log"]')`), false)
+  assert.equal(await page.evaluate(`!!document.getElementById('panel-log')`), false)
+  await page.close()
+
+  const res = await fetch(`http://127.0.0.1:${PORT}/api/overview`, { method: 'POST' })
+  const payload = (await res.json()) as { result: Record<string, unknown> }
+  assert.equal('log' in payload.result, false)
 })
 
 test('the tab in the URL is the tab you get back on reload', skip, async () => {
@@ -235,6 +309,7 @@ test('the tablist is keyboard navigable', skip, async () => {
 
 test('an unknown hash falls back rather than showing nothing', skip, async () => {
   const page = await browser.newPage()
+  opened.push(page)
   await page.goto(`http://127.0.0.1:${PORT}/#nonsense`, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(`document.querySelectorAll('.kpi').length > 0`, { timeout: 8000 })
   assert.equal(await selected(page), 'overview')
@@ -323,6 +398,7 @@ test('the dashboard is dark by default, whatever the operating system says', ski
   // a light OS must not drag the page back.
   for (const os of ['dark', 'light'] as const) {
     const page = await browser.newPage()
+    opened.push(page)
     await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: os }])
     await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(`document.querySelectorAll('.kpi').length > 0`, { timeout: 8000 })
@@ -335,9 +411,19 @@ test('the dashboard is dark by default, whatever the operating system says', ski
   }
 })
 
-test('the switch changes the theme and says what pressing it will do', skip, async () => {
+test('the switch changes the theme, and shows the one you would get', skip, async () => {
+  // A switch labelled with the state it is already in is the oldest confusing
+  // control there is, and an icon has the same failure mode as a word. In the
+  // dark it offers a sun.
   const page = await open()
-  assert.equal(await page.evaluate(`document.getElementById('theme').textContent`), 'Switch to light')
+  const showing = () =>
+    page.evaluate(`(() => {
+      const el = document.getElementById('theme')
+      const on = [...el.querySelectorAll('svg')].filter(s => getComputedStyle(s).display !== 'none')
+      return on.length === 1 ? on[0].getAttribute('class') : 'both or neither: ' + on.length
+    })()`)
+
+  assert.equal(await showing(), 'moon')
 
   await page.evaluate(`document.getElementById('theme').click()`)
   assert.equal(
@@ -345,10 +431,48 @@ test('the switch changes the theme and says what pressing it will do', skip, asy
     'rgb(255, 251, 245)',
     'the house paper is still there, one click away',
   )
-  assert.equal(await page.evaluate(`document.getElementById('theme').textContent`), 'Switch to dark')
+  assert.equal(await showing(), 'sun')
 
   await page.evaluate(`document.getElementById('theme').click()`)
   assert.equal(await page.evaluate(`getComputedStyle(document.body).backgroundColor`), 'rgb(20, 18, 15)')
+  assert.equal(await showing(), 'moon')
+  await page.evaluate(`localStorage.removeItem('atelier:theme')`)
+  await page.close()
+})
+
+test('the header runs from the sidebar to the far edge, with the drawer handle on the boundary', skip, async () => {
+  const page = await open()
+  const geometry = (await page.evaluate(`(() => {
+    const side = document.querySelector('.side').getBoundingClientRect()
+    const head = document.querySelector('.head').getBoundingClientRect()
+    const handle = document.querySelector('#drawer').getBoundingClientRect()
+    const right = document.querySelector('.head-right').getBoundingClientRect()
+    return { sideRight: side.right, headLeft: head.left, headRight: head.right,
+             handleLeft: handle.left, w: window.innerWidth, rightLeft: right.left }
+  })()`)) as Record<string, number>
+
+  assert.ok(Math.abs(geometry.headLeft! - geometry.sideRight!) < 2, 'it starts where the menu ends')
+  assert.ok(Math.abs(geometry.headRight! - geometry.w!) < 2, 'and runs to the edge')
+  assert.ok(geometry.handleLeft! - geometry.headLeft! < 40, 'the handle is its leftmost thing')
+  assert.ok(geometry.rightLeft! > geometry.w! / 2, 'and the frame controls are at the other end')
+  await page.close()
+})
+
+test('the header controls read theme, then Projects, then the project itself', skip, async () => {
+  // Left to right: the thing about the page, the list of frames, and the frame
+  // you are in. The switcher is last because it is the one everything below is
+  // being read inside.
+  const page = await open()
+  const order = (await page.evaluate(
+    `[...document.querySelectorAll('.head-right > *')].map(el => el.id || el.className)`,
+  )) as string[]
+  assert.deepEqual(order, ['theme', 'tab-projects', 'switcher'])
+  await page.close()
+})
+
+test('no live chip: a connection you do not have to think about is not worth a pixel', skip, async () => {
+  const page = await open()
+  assert.equal(await page.evaluate(`!!document.getElementById('live')`), false)
   await page.close()
 })
 
@@ -403,14 +527,15 @@ test('both themes keep readable contrast on the text that carries the status', s
     // and a bare `const` on the second pass through this loop is a redeclaration.
     const [fg, bg] = (await page.evaluate(`
       (() => {
-        const el = document.getElementById('sidestat-text')
+        const el = document.getElementById('page-sub')
         return [getComputedStyle(el).color, getComputedStyle(document.body).backgroundColor]
       })()
     `)) as [string, string]
     const [a, b] = [luminance(fg), luminance(bg)].sort((x, y) => y - x)
     const ratio = (a! + 0.05) / (b! + 0.05)
-    assert.ok(ratio > 3, `${theme}: status text is ${ratio.toFixed(1)}:1 against the page`)
+    assert.ok(ratio > 3, `${theme}: the header subtitle is ${ratio.toFixed(1)}:1 against the page`)
   }
+  await page.evaluate(`document.documentElement.removeAttribute('data-theme')`)
   await page.close()
 })
 
@@ -539,8 +664,10 @@ test('an asset can be deleted from the viewer, and the grid follows', skip, asyn
   repo.setAssetDescription(doomed.id, 'ZZZ delete me')
 
   const page = await open()
-  // Confirm is a native dialog; accept it the way a person would.
-  page.on('dialog', (d: any) => d.accept())
+  // The dashboard asks in its own dialog now. The browser's blocks the event
+  // loop the live stream runs on, cannot be styled, and reads as though the
+  // page is asking at the moment the question is about the button just pressed.
+  page.on('dialog', () => assert.fail('the dashboard must not raise a browser dialog'))
 
   await page.evaluate(`location.hash = '#assets'`)
   await page.waitForFunction(`document.querySelectorAll('#assets [data-asset]').length > 0`, { timeout: 8000 })
@@ -551,6 +678,11 @@ test('an asset can be deleted from the viewer, and the grid follows', skip, asyn
   await page.evaluate(`document.querySelectorAll('#assets [data-asset]')[0].click()`)
   await page.waitForFunction(`document.querySelector('#viewer').open`, { timeout: 4000 })
   await page.click('#v-delete')
+  // The viewer is a modal dialog, so everything outside it is inert. A confirm
+  // drawn as an ordinary overlay rendered fine and swallowed every click aimed
+  // at it, which is why this one is a dialog too.
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  await page.click('#ask-go')
   await new Promise((r) => setTimeout(r, 900))
 
   assert.equal(repo.getAsset(doomed.id), null, 'the asset is gone from the database')
@@ -568,13 +700,14 @@ test('deleting cannot be triggered without confirming', skip, async () => {
   })
 
   const page = await open()
-  page.on('dialog', (d: any) => d.dismiss())
 
   await page.evaluate(`location.hash = '#assets'`)
   await page.waitForFunction(`document.querySelectorAll('#assets [data-asset]').length > 0`, { timeout: 8000 })
   await page.evaluate(`document.querySelectorAll('#assets [data-asset]')[0].click()`)
   await page.waitForFunction(`document.querySelector('#viewer').open`, { timeout: 4000 })
   await page.click('#v-delete')
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  await page.click('#ask-stop')
   await new Promise((r) => setTimeout(r, 700))
 
   assert.ok(repo.getAsset(spared.id), 'declining the prompt must leave the asset alone')
@@ -718,6 +851,232 @@ test('the Connect tab shows a config an agent can actually be pointed at', skip,
   assert.equal(shown.mcpServers.atelier.type, 'http')
   assert.match(shown.mcpServers.atelier.url, new RegExp(`127\\.0\\.0\\.1:${PORT}/mcp$`))
   assert.match(shown.mcpServers.atelier.headers.Authorization, /^Bearer \S+/)
+  await page.close()
+})
+
+test('the Connect tab hands out the token of the project on screen', skip, async () => {
+  // One daemon, one config file per project. The token is how an agent knows
+  // where it is working, so the file you download while looking at a project is
+  // the file that puts an agent in that project.
+  const here = repo.activeProject()
+  const page = await open()
+  await page.evaluate(`document.querySelector('[data-tab="connect"]').click()`)
+  await page.waitForFunction(`document.getElementById('mcp-json').textContent.includes('mcpServers')`, {
+    timeout: 8000,
+  })
+  const shown = JSON.parse(await page.evaluate(`document.getElementById('mcp-json').textContent`))
+  assert.equal(shown.mcpServers.atelier.headers.Authorization, `Bearer ${here.token}`)
+  assert.match(
+    await page.evaluate(`document.getElementById('mcp-download').getAttribute('href')`),
+    new RegExp(`project=${here.id}`),
+  )
+  await page.close()
+})
+
+test('issuing a new token retires the old one, and asks before it does', skip, async () => {
+  const before = repo.activeProject().token
+  const page = await open()
+  await page.evaluate(`document.querySelector('[data-tab="connect"]').click()`)
+  await page.waitForFunction(`document.getElementById('mcp-json').textContent.includes('mcpServers')`, {
+    timeout: 8000,
+  })
+  await page.click('#mcp-rotate')
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  await page.click('#ask-go')
+  await page.waitForFunction(
+    `!document.getElementById('mcp-json').textContent.includes(${JSON.stringify(before)})`,
+    { timeout: 8000 },
+  )
+  assert.notEqual(repo.activeProject().token, before)
+  assert.equal(repo.projectByToken(before), null, 'the old one opens nothing')
+  await page.close()
+})
+
+/* --------------------------------------------------------- one workflow */
+
+test('a workflow has a page of its own, reachable by name from anywhere', skip, async () => {
+  const project = repo.createProject('Workflow Page')
+  repo.setActiveProject(project.id)
+  repo.saveWorkflow({
+    name: 'has-a-page',
+    description: 'test',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [{ name: 'prompt', description: 'x', required: true }],
+    produces: 'image',
+    steps: [
+      {
+        id: 'w1',
+        kind: 'type',
+        target: 'Describe the image',
+        valueMode: 'dynamic',
+        inputName: 'prompt',
+        sampleValue: 'a rope bridge',
+        value: '{{prompt}}',
+        timeoutMs: 30000,
+        note: 'Type the prompt into Describe the image',
+        selectors: [{ strategy: 'id', value: '#p', score: 92 }],
+      },
+      {
+        id: 'w2',
+        kind: 'click',
+        target: 'Generate',
+        timeoutMs: 30000,
+        note: 'Click Generate',
+        selectors: [{ strategy: 'text', value: 'Generate', score: 96 }],
+      },
+    ],
+  } as never)
+
+  const page = await open()
+  // The address the extension popup links to.
+  await page.evaluate(`location.hash = '#workflow/has-a-page'`)
+  await page.waitForFunction(`document.querySelectorAll('#workflow-one .steps li').length === 2`, {
+    timeout: 8000,
+  })
+
+  const rows = (await page.evaluate(
+    `[...document.querySelectorAll('#workflow-one .steps li')].map(li =>
+      [...li.querySelectorAll('.step-row')].map(r => r.querySelector('.step-v').textContent))`,
+  )) as string[][]
+  // Read top to bottom here, unlike the recorder's panel: this is the order
+  // replay runs them in, and a page you arrive at cold should read forwards.
+  assert.deepEqual(rows, [
+    ['Describe the image', 'Type text into it'],
+    ['Generate', 'Click it'],
+  ])
+
+  // What the agent has to pass, which is the question anyone opening this page
+  // to call the thing actually has.
+  const text = (await page.evaluate(`document.querySelector('#workflow-one').innerText`)) as string
+  assert.match(text, /\{\{prompt\}\}/)
+  assert.match(text, /a rope bridge/, 'and what a test run would type')
+  await page.close()
+})
+
+test('a value can be changed from the page; an action cannot', skip, async () => {
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/has-a-page'`)
+  await page.waitForFunction(`document.querySelectorAll('#workflow-one .steps li').length === 2`, {
+    timeout: 8000,
+  })
+
+  // Nothing anywhere offers to change what a step does.
+  assert.equal(
+    await page.evaluate(`document.querySelectorAll('#workflow-one [data-action], #workflow-one select').length`),
+    0,
+  )
+
+  await page.click('#workflow-one [data-edit="w1"]')
+  await page.waitForSelector('#workflow-one .step-edit', { timeout: 4000 })
+  await page.click('#workflow-one [data-mode="static"]')
+  await page.waitForFunction(
+    `document.querySelector('#workflow-one [data-mode="static"]').getAttribute('aria-pressed') === 'true'`,
+    { timeout: 4000 },
+  )
+  await page.evaluate(`document.getElementById('sv').value = 'a fixed prompt'`)
+  await page.click('#workflow-one [data-save-step]')
+  await new Promise((r) => setTimeout(r, 900))
+
+  const saved = repo.getWorkflowByName('has-a-page')!
+  const step = saved.steps.find((x) => x.id === 'w1')!
+  assert.equal(step.valueMode, 'static')
+  assert.equal(step.value, 'a fixed prompt')
+  // A static value is setup, so it stops being part of the signature the agent
+  // sees — which is the whole reason to mark one.
+  assert.deepEqual(saved.inputs, [])
+  await page.close()
+})
+
+test('a clashing input name is refused, and the page says so', skip, async () => {
+  // The rule lives in the repo, so both write paths get it — but a rule nobody
+  // is told about presents as a Save button that does nothing.
+  const project = repo.activeProject()
+  repo.saveWorkflow({
+    projectId: project.id,
+    name: 'two-fields',
+    description: 'test',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [
+      {
+        id: 'f1',
+        kind: 'type',
+        target: 'Same text',
+        valueMode: 'dynamic',
+        inputName: 'same_text',
+        sampleValue: 'a',
+        value: '{{same_text}}',
+        timeoutMs: 30000,
+        selectors: [{ strategy: 'id', value: '#a', score: 92 }],
+      },
+      {
+        id: 'f2',
+        kind: 'type',
+        target: 'Other',
+        valueMode: 'static',
+        sampleValue: 'b',
+        value: 'b',
+        timeoutMs: 30000,
+        selectors: [{ strategy: 'id', value: '#b', score: 92 }],
+      },
+    ],
+  } as never)
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/two-fields'`)
+  await page.waitForSelector('#workflow-one [data-edit="f2"]', { timeout: 8000 })
+  await page.click('#workflow-one [data-edit="f2"]')
+  await page.waitForSelector('#workflow-one [data-mode="dynamic"]', { timeout: 4000 })
+  await page.click('#workflow-one [data-mode="dynamic"]')
+  await page.waitForSelector('#iv', { timeout: 4000 })
+  // A different spelling of a name that is already taken.
+  await page.evaluate(`document.getElementById('iv').value = 'SAME Text'`)
+  await page.click('#workflow-one [data-save-step]')
+
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  const said = await page.evaluate(`document.querySelector('#ask-card p').textContent`)
+  assert.match(said as string, /already asks the agent for/i)
+
+  assert.equal(repo.getWorkflowByName('two-fields')!.steps[1]!.valueMode, 'static', 'unchanged')
+  await page.close()
+})
+
+test('a workflow can be turned off without being lost, and back on', skip, async () => {
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/has-a-page'`)
+  await page.waitForSelector('#workflow-one [data-status="disabled"]', { timeout: 8000 })
+  await page.click('#workflow-one [data-status="disabled"]')
+  await page.waitForFunction(`!!document.querySelector('#workflow-one [data-status="active"]')`, {
+    timeout: 8000,
+  })
+
+  const off = repo.getWorkflowByName('has-a-page')!
+  assert.equal(off.status, 'disabled')
+  assert.equal(off.steps.length, 2, 'it keeps everything it had')
+
+  await page.click('#workflow-one [data-status="active"]')
+  await page.waitForFunction(`!!document.querySelector('#workflow-one [data-status="disabled"]')`, {
+    timeout: 8000,
+  })
+  assert.equal(repo.getWorkflowByName('has-a-page')!.status, 'active')
+  await page.close()
+})
+
+test('deleting a workflow asks first, and says what disabling would do instead', skip, async () => {
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/has-a-page'`)
+  await page.waitForSelector('#workflow-one [data-delete]', { timeout: 8000 })
+  await page.click('#workflow-one [data-delete]')
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  const body = (await page.evaluate(`document.querySelector('#ask-card p').textContent`)) as string
+  assert.match(body, /disable it instead/i)
+  await page.click('#ask-stop')
+  assert.ok(repo.getWorkflowByName('has-a-page'), 'declining leaves it alone')
   await page.close()
 })
 

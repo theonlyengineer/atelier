@@ -16,7 +16,7 @@ process.env.ATELIER_HOME = mkdtempSync(join(tmpdir(), 'atelier-repair-'))
 
 const repo = await import('../src/db/repo.ts')
 const { assessWorkflow } = await import('../src/core/health.ts')
-const { stepFromAction } = await import('../src/core/runner.ts')
+const { stepFromPick } = await import('../src/core/runner.ts')
 
 const sel = (strategy: string, value: string, score: number) => ({ strategy, value, score }) as never
 
@@ -113,45 +113,43 @@ test('replacing a step that does not exist is an error, not a silent no-op', () 
   assert.throws(() => repo.replaceStep(wf.id, 'nope', {}), /no step nope/)
 })
 
-test('removing a step works, and removing the last one is refused', () => {
-  const wf = makeWorkflow('repair-remove')
-  const after = repo.removeStep(wf.id, 'step-two')
-  assert.deepEqual(after.steps.map((s) => s.id), ['step-one'])
-  assert.throws(() => repo.removeStep(wf.id, 'step-one'), /at least one step/)
+/*
+ * Repointing: the repair that changes where a step looks and nothing else.
+ *
+ * It replaced re-recording one step, which also carried the value across, and
+ * that was a mistake worth naming. A page moving says nothing about what a step
+ * should type, so a repair that quietly rewrote the value could undo a decision
+ * made deliberately weeks earlier. What a step *does* is now unchangeable
+ * everywhere: the recorder refuses it, the dashboard refuses it, and this
+ * refuses it.
+ */
+
+test('a repointed step takes the confirmed name as its best selector', () => {
+  const patch = stepFromPick({
+    target: 'Generate',
+    identifier: { strategy: 'text', value: 'Generate', score: 96 },
+    selectors: [
+      { strategy: 'xpath', value: '/html/body/b', score: 30 },
+      { strategy: 'testid', value: '[data-testid="go"]', score: 98 },
+    ],
+  })
+  assert.equal(patch.selectors![0]!.value, 'Generate')
+  assert.equal(patch.selectors!.length, 3)
+  assert.equal(patch.target, 'Generate')
 })
 
-test('a re-recorded action becomes new selectors, best first, and nothing else', () => {
-  const patch = stepFromAction({
-    element: {
-      selectors: [
-        { strategy: 'xpath', value: '/html/body/b', score: 30 },
-        { strategy: 'testid', value: '[data-testid="go"]', score: 98 },
-      ],
-    },
+test('repointing changes nothing but where the step looks and what it is called', () => {
+  const patch = stepFromPick({
+    target: 'Prompt',
+    selectors: [{ strategy: 'id', value: '#f', score: 92 }],
   })
-  assert.equal(patch.selectors![0]!.strategy, 'testid')
-  assert.equal(patch.selectors!.length, 2)
   assert.equal(patch.value, undefined)
+  assert.equal(patch.valueMode, undefined)
   assert.equal((patch as Record<string, unknown>).kind, undefined)
 })
 
-test('a re-recorded typed value comes through, but a secret never does', () => {
-  const open = stepFromAction({
-    element: { selectors: [{ strategy: 'id', value: '#f', score: 92 }] },
-    value: 'hello',
-  })
-  assert.equal(open.value, 'hello')
-
-  const secret = stepFromAction({
-    element: { selectors: [{ strategy: 'id', value: '#p', score: 92 }] },
-    value: 'hunter2',
-    secret: true,
-  })
-  assert.equal(secret.value, undefined)
-})
-
-test('a re-recorded action with no identifiable element is refused rather than saved as a dead step', () => {
-  assert.throws(() => stepFromAction({ element: { selectors: [] } }), /could not be identified/)
+test('a pick with no identifiable element is refused rather than saved as a dead step', () => {
+  assert.throws(() => stepFromPick({ selectors: [] }), /could not be identified/)
 })
 
 test('deleting a workflow takes its health record with it', () => {
@@ -159,4 +157,106 @@ test('deleting a workflow takes its health record with it', () => {
   repo.recordStepMatch(wf.id, 'step-one', 'testid', 98)
   repo.deleteWorkflow(wf.id)
   assert.equal(repo.stepMatches(wf.id).length, 0)
+})
+
+/* --------------------------------------------------- one name, one value */
+
+/**
+ * The same rule the control panel enforces, on the other write path.
+ *
+ * A value can be moved between "always this" and "the agent supplies it" long
+ * after the recording — from the workflow's page, or by an agent calling
+ * set_step_value. Both arrive here, so this is where two fields are stopped
+ * from asking for the same thing.
+ */
+
+const twoTyped = (name: string) =>
+  repo.saveWorkflow({
+    name,
+    description: 'test',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [
+      {
+        id: 'one',
+        kind: 'type',
+        target: 'Same text',
+        selectors: [{ strategy: 'id', value: '#a', score: 92 }],
+        valueMode: 'dynamic',
+        inputName: 'same_text',
+        sampleValue: 'a',
+        value: '{{same_text}}',
+        timeoutMs: 30000,
+      },
+      {
+        id: 'two',
+        kind: 'type',
+        target: 'Other',
+        selectors: [{ strategy: 'id', value: '#b', score: 92 }],
+        valueMode: 'static',
+        sampleValue: 'b',
+        value: 'b',
+        timeoutMs: 30000,
+      },
+    ],
+  } as never)
+
+test('a second field cannot be given a name another already asks for', () => {
+  const wf = twoTyped('clash-plain')
+  assert.throws(
+    () => repo.setStepValue(wf.id, 'two', { valueMode: 'dynamic', inputName: 'same_text' }),
+    /already asks the agent for/i,
+  )
+})
+
+test('and the comparison is on what the name becomes, not on how it was typed', () => {
+  // "Same text", "SAME Text" and "same_text" are one name. Comparing the raw
+  // strings would let all three through and hand an agent one input where the
+  // person thought they had three.
+  for (const spelling of ['Same text', 'SAME Text', 'same_text', '  same   TEXT  ']) {
+    const wf = twoTyped('clash-' + spelling.replace(/\W+/g, ''))
+    assert.throws(
+      () => repo.setStepValue(wf.id, 'two', { valueMode: 'dynamic', inputName: spelling }),
+      /already asks the agent for/i,
+      `"${spelling}" should be refused`,
+    )
+  }
+})
+
+test('a step may keep the name it already has, however it is respelled', () => {
+  const wf = twoTyped('keep-own-name')
+  const after = repo.setStepValue(wf.id, 'one', { inputName: 'SAME Text', sampleValue: 'changed' })
+  assert.equal(after.steps.find((s) => s.id === 'one')!.inputName, 'same_text')
+  assert.equal(after.steps.find((s) => s.id === 'one')!.sampleValue, 'changed')
+})
+
+test('a free name is fine, and becomes one of the workflow inputs', () => {
+  const wf = twoTyped('free-name')
+  const after = repo.setStepValue(wf.id, 'two', { valueMode: 'dynamic', inputName: 'Other thing' })
+  assert.deepEqual(
+    after.inputs.map((i) => i.name),
+    ['same_text', 'other_thing'],
+  )
+})
+
+test('a static value collides with nothing, because nothing asks for it', () => {
+  // Setup is replayed exactly and never reaches the caller, so two of them can
+  // share a name without anything being ambiguous.
+  const wf = twoTyped('static-never-clashes')
+  const after = repo.setStepValue(wf.id, 'two', { valueMode: 'static', sampleValue: 'x' })
+  assert.deepEqual(
+    after.inputs.map((i) => i.name),
+    ['same_text'],
+  )
+})
+
+test('a dynamic value with no usable name at all is refused', () => {
+  const wf = twoTyped('blank-name')
+  assert.throws(
+    () => repo.setStepValue(wf.id, 'two', { valueMode: 'dynamic', inputName: '   ' }),
+    /name the agent can pass it under/i,
+  )
 })

@@ -42,9 +42,9 @@ export class Runner {
   }
 
   /** Queue a job and try to start it immediately. */
-  start(workflow: Workflow, inputs: Record<string, string>): Job {
-    const job = repo.createJob(workflow.id, inputs, workflow.steps.length)
-    repo.addJobEvent(job.id, 'queued', { inputs })
+  start(workflow: Workflow, inputs: Record<string, string>, isTest = false): Job {
+    const job = repo.createJob(workflow.id, inputs, workflow.steps.length, isTest)
+    repo.addJobEvent(job.id, 'queued', { inputs, isTest })
     this.pump(job.id)
     return repo.getJob(job.id)!
   }
@@ -244,16 +244,17 @@ export class Runner {
         break
       }
 
-      case 'step.rerecord': {
+      case 'step.repoint': {
         // Repairing one step of a workflow whose page moved, without
-        // re-recording the other nineteen.
+        // re-recording the other nineteen. Only where the step *looks*: the
+        // action it performs is what the person demonstrated and is not
+        // re-opened here.
         const workflow = repo.getWorkflowByName(msg.workflowName)
         if (!workflow) break
         try {
-          const patch = stepFromAction(msg.action)
-          repo.replaceStep(workflow.id, msg.stepId, patch)
+          repo.replaceStep(workflow.id, msg.stepId, stepFromPick(msg.pick))
         } catch (e) {
-          this.deps.notify?.('Atelier could not replace that step', (e as Error).message)
+          this.deps.notify?.('Atelier could not repoint that step', (e as Error).message)
         }
         this.deps.onChange()
         break
@@ -265,24 +266,33 @@ export class Runner {
 }
 
 /**
- * One recorded action → the fields of a step, for re-recording a single step in
- * place. Deliberately narrow: it replaces how the step *finds* its element and
- * what it types, and leaves everything else — kind, waits, timeout, note —
- * alone, because those were reviewed once and the page moving does not
- * invalidate them.
+ * One re-pointed element → the fields of a step.
+ *
+ * Deliberately narrow: it replaces how the step *finds* its element and what
+ * the person calls it, and leaves everything else — kind, value, waits,
+ * timeout — alone. Those were decided when the workflow was made, and the page
+ * moving does not invalidate any of them.
  */
-export function stepFromAction(action: unknown): Partial<Step> {
-  const a = (action ?? {}) as {
-    element?: { selectors?: Array<{ strategy: string; value: string; score: number }> }
-    value?: string | null
-    secret?: boolean
+export function stepFromPick(pick: unknown): Partial<Step> {
+  const p = (pick ?? {}) as {
+    target?: string
+    identifier?: { strategy: string; value: string; score: number } | null
+    selectors?: Array<{ strategy: string; value: string; score: number }>
   }
-  const selectors = [...(a.element?.selectors ?? [])].sort((x, y) => y.score - x.score)
+  const harvested = [...(p.selectors ?? [])].sort((x, y) => y.score - x.score)
+  const confirmed = p.identifier?.value
+    ? [{ ...p.identifier, score: 96 } as Step['selectors'][number]]
+    : []
+  const selectors = [
+    ...confirmed,
+    ...harvested.filter(
+      (s) => !confirmed.some((c) => c.strategy === s.strategy && c.value === s.value),
+    ),
+  ] as Step['selectors']
   if (selectors.length === 0) {
-    throw new Error('that element could not be identified — try clicking the control itself')
+    throw new Error('that element could not be identified — point at the control itself')
   }
-  const patch: Partial<Step> = { selectors: selectors as Step['selectors'] }
-  // A secret is never written down, here or anywhere else.
-  if (typeof a.value === 'string' && !a.secret) patch.value = a.value
+  const patch: Partial<Step> = { selectors }
+  if (p.target) patch.target = p.target
   return patch
 }

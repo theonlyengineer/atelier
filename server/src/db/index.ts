@@ -4,13 +4,22 @@
  * and run rather than deployed.
  */
 import { DatabaseSync } from 'node:sqlite'
-import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { chmodSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DB_PATH, ensureDirs } from '../paths.ts'
 
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 4
+
+/**
+ * A project's bearer token.
+ *
+ * Long enough that guessing is not a strategy, short enough to paste, and
+ * generated here rather than asked for — the whole point of the thing is that
+ * connecting an agent to a project is a copy, not a decision.
+ */
+export const newToken = (): string => randomBytes(24).toString('base64url')
 
 let db: DatabaseSync | null = null
 
@@ -23,6 +32,14 @@ export function open(path = DB_PATH): DatabaseSync {
   // Resolves in both dist/ (schema copied alongside) and src/ under --experimental-strip-types.
   const schema = readFileSync(join(here, 'schema.sql'), 'utf-8')
   db.exec(schema)
+
+  // The database holds every project's MCP token, so it is the credential file
+  // now. Other users on a shared machine are exactly who this mode is for.
+  try {
+    chmodSync(path, 0o600)
+  } catch {
+    /* a filesystem that has no modes is not a reason to refuse to start */
+  }
 
   // schema.sql is all CREATE TABLE IF NOT EXISTS, so it brings a fresh database
   // fully up to date. A database that already exists needs the difference
@@ -65,12 +82,20 @@ function migrate(db: DatabaseSync): void {
   // schema.sql already created the project table. A database that predates it
   // has rows with nowhere to live, so they all move into one Default project —
   // which is also what a fresh install gets, so both paths converge.
+  if (!columns('project').includes('token')) {
+    db.exec(`ALTER TABLE project ADD COLUMN token TEXT NOT NULL DEFAULT ''`)
+  }
+  if (!columns('job').includes('is_test')) {
+    db.exec(`ALTER TABLE job ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0`)
+  }
+
   const projects = db.prepare(`SELECT COUNT(*) AS n FROM project`).get() as { n: number }
   let defaultId: string | null = null
   if (projects.n === 0) {
     defaultId = randomUUID()
-    db.prepare(`INSERT INTO project (id, name, slug, created_at) VALUES (?, 'Default', 'default', ?)`)
-      .run(defaultId, new Date().toISOString())
+    db.prepare(
+      `INSERT INTO project (id, name, slug, token, created_at) VALUES (?, 'Default', 'default', ?, ?)`,
+    ).run(defaultId, newToken(), new Date().toISOString())
   } else {
     const first = db.prepare(`SELECT id FROM project ORDER BY created_at LIMIT 1`).get() as { id: string }
     defaultId = first.id
@@ -121,8 +146,19 @@ function migrate(db: DatabaseSync): void {
     db.exec(`CREATE INDEX IF NOT EXISTS workflow_project_idx ON workflow(project_id)`)
   }
 
+  // A project that predates per-project tokens has an empty one. Filled before
+  // the unique index below, which an empty string in two rows would fail.
+  for (const row of db.prepare(`SELECT id FROM project WHERE token = ''`).all() as Array<{
+    id: string
+  }>) {
+    db.prepare(`UPDATE project SET token = ? WHERE id = ?`).run(newToken(), row.id)
+  }
+
+  backfillStepValues(db)
+
   // Indexes last, once every column they name is guaranteed to exist.
   db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS project_token_idx ON project(token);
     CREATE INDEX IF NOT EXISTS workflow_project_idx ON workflow(project_id);
     CREATE INDEX IF NOT EXISTS job_project_idx ON job(project_id);
     CREATE INDEX IF NOT EXISTS asset_project_idx ON asset(project_id);
@@ -141,6 +177,60 @@ function migrate(db: DatabaseSync): void {
       `INSERT INTO meta (key, value) VALUES ('active_project', ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     ).run(defaultId)
+  }
+}
+
+/**
+ * Teach a workflow recorded by the old recorder to say what it already meant.
+ *
+ * A step used to carry a value and nothing else; whether the caller supplied it
+ * was expressed only by the value happening to be a {{placeholder}}, and a
+ * workflow's inputs were a separate list written once at proposal time.
+ *
+ * Both are now derived from the steps, which is what keeps a signature from
+ * drifting from what the steps actually do. Without this backfill the first
+ * edit to any value on an old workflow would rebuild its inputs from steps that
+ * never said they were dynamic — and quietly drop every input it declared,
+ * breaking the workflow for the agent that has been calling it for weeks.
+ *
+ * `sampleValue` on a migrated dynamic step is empty, because the text that was
+ * typed was never stored. That is honest: the workflow's page says a test run
+ * would type nothing, which is an invitation to fill it in rather than a lie.
+ */
+function backfillStepValues(db: DatabaseSync): void {
+  const rows = db.prepare(`SELECT id, steps FROM workflow`).all() as Array<{
+    id: string
+    steps: string
+  }>
+
+  for (const row of rows) {
+    let steps: Array<Record<string, unknown>>
+    try {
+      steps = JSON.parse(row.steps)
+    } catch {
+      continue
+    }
+    if (!Array.isArray(steps)) continue
+
+    let touched = false
+    for (const step of steps) {
+      if (step.kind !== 'type' && step.kind !== 'select') continue
+      if (step.valueMode) continue
+      const value = typeof step.value === 'string' ? step.value : ''
+      const placeholder = /^\{\{\s*([\w.-]+)\s*\}\}$/.exec(value)
+      if (placeholder) {
+        step.valueMode = 'dynamic'
+        step.inputName = placeholder[1]
+        step.sampleValue = ''
+      } else {
+        step.valueMode = 'static'
+        step.sampleValue = value
+      }
+      touched = true
+    }
+    if (touched) {
+      db.prepare(`UPDATE workflow SET steps = ? WHERE id = ?`).run(JSON.stringify(steps), row.id)
+    }
   }
 }
 

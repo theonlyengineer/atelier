@@ -10,8 +10,8 @@ import type { Hub } from '../ws/hub.ts'
 import * as repo from '../db/repo.ts'
 import * as assets from '../core/assets.ts'
 import { assessWorkflow } from '../core/health.ts'
-import { proposeWorkflow } from '../core/propose.ts'
-import type { Workflow } from '../types.ts'
+import { proposeWorkflow, sampleInputs } from '../core/propose.ts'
+import type { Workflow, WorkflowStatus } from '../types.ts'
 
 export interface ApiDeps {
   hub: Hub
@@ -54,6 +54,13 @@ export const routes: Record<string, Handler> = {
   }),
 
   '/api/projects.create': (b) => ({ project: repo.createProject(b?.name ?? missing('name'), b?.note) }),
+
+  /** Issue a new token for a project, invalidating every config file that
+   *  carries the old one. The only way to revoke access, so it is a button
+   *  somebody presses rather than anything automatic. */
+  '/api/projects.rotateToken': (b) => ({
+    project: repo.rotateProjectToken(b?.id ?? missing('id')),
+  }),
 
   '/api/projects.rename': (b) => ({
     project: repo.renameProject(b?.id ?? missing('id'), b?.name ?? missing('name')),
@@ -127,8 +134,49 @@ export const routes: Record<string, Handler> = {
     const name = b?.name ?? missing('name')
     const w = repo.getWorkflowByName(name)
     if (!w) throw new Error(`no workflow named ${name}`)
-    if (!w.steps.length) throw new Error(`workflow "${name}" has no steps to run`)
-    return { workflow: repo.saveWorkflow({ ...w, status: 'active' }) }
+    return { workflow: repo.setWorkflowStatus(w.id, 'active') }
+  },
+
+  /**
+   * Turn a workflow off without deleting it.
+   *
+   * A disabled workflow is invisible to the agent and to the popup and refuses
+   * to run, but keeps its steps, its history and its health. It is the honest
+   * middle between "this is fine" and "this is gone" — a site changed, the
+   * workflow is broken for now, and nobody wants to re-record it from scratch
+   * to find that out.
+   */
+  '/api/workflows.setStatus': (b) => {
+    const name = b?.name ?? missing('name')
+    const status = (b?.status ?? missing('status')) as WorkflowStatus
+    if (!['draft', 'active', 'disabled'].includes(status)) {
+      throw new Error(`"${status}" is not a workflow status`)
+    }
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    return { workflow: repo.setWorkflowStatus(w.id, status) }
+  },
+
+  /**
+   * Change one step's value: static or dynamic, and what a test run types.
+   *
+   * The only edit a recorded workflow accepts. The action a step performs is
+   * what the person demonstrated and is not re-openable — a workflow whose
+   * steps can be rewritten into something nobody ever performed is a workflow
+   * nobody checked.
+   */
+  '/api/workflows.setStepValue': (b) => {
+    const name = b?.name ?? missing('name')
+    const stepId = b?.stepId ?? missing('stepId')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    return {
+      workflow: repo.setStepValue(w.id, stepId, {
+        ...(b?.valueMode ? { valueMode: b.valueMode } : {}),
+        ...(typeof b?.sampleValue === 'string' ? { sampleValue: b.sampleValue } : {}),
+        ...(b?.inputName ? { inputName: b.inputName } : {}),
+      }),
+    }
   },
 
   /** Edit one step in place. The repair path for a workflow whose page moved:
@@ -139,14 +187,6 @@ export const routes: Record<string, Handler> = {
     const w = repo.getWorkflowByName(name)
     if (!w) throw new Error(`no workflow named ${name}`)
     return { workflow: repo.replaceStep(w.id, stepId, b?.step ?? {}) }
-  },
-
-  '/api/workflows.removeStep': (b) => {
-    const name = b?.name ?? missing('name')
-    const stepId = b?.stepId ?? missing('stepId')
-    const w = repo.getWorkflowByName(name)
-    if (!w) throw new Error(`no workflow named ${name}`)
-    return { workflow: repo.removeStep(w.id, stepId) }
   },
 
   /** Re-propose from the original recording. Useful when the proposal rules
@@ -204,6 +244,23 @@ export const routes: Record<string, Handler> = {
       if (spec.required && !inputs[spec.name]) throw new Error(`input "${spec.name}" is required`)
     }
     return { job: d.runner.start(w, inputs) }
+  },
+
+  /**
+   * Run a workflow with the values it was recorded with.
+   *
+   * The point of keeping a sample value on a dynamic step: checking that a
+   * workflow still works should not require inventing a plausible-looking
+   * prompt, and a test that types something the person never typed is testing a
+   * different workflow. Allowed on a draft as well as an active one — trying it
+   * before allowing it to run is the whole reason to try it.
+   */
+  '/api/workflows.test': (b, d) => {
+    const name = b?.name ?? missing('name')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    if (w.status === 'disabled') throw new Error(`workflow "${name}" is disabled — enable it first`)
+    return { job: d.runner.start(w, sampleInputs(w), true) }
   },
 
   '/api/jobs.status': (b) => {
