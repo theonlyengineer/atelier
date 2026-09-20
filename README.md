@@ -27,7 +27,7 @@ npm run build
 1. Open **`chrome://extensions`**
 2. Turn on **Developer mode** (top right)
 3. **Load unpacked** → select the **`extension/`** folder in this repo
-4. Pin Atelier to the toolbar, and click it to open the side panel
+4. Pin Atelier to the toolbar, and click it to open the popup
 
 The extension finds the daemon on localhost by itself. There is nothing to paste and
 no settings page.
@@ -48,19 +48,61 @@ npm start
 
 ### Register with Claude Code
 
-From the workspace root:
+Either of two ways, and they offer exactly the same tools.
+
+**Spawned, from a checkout** — nothing to start first, since the first tool call
+brings the daemon up by itself:
 
 ```sh
 claude mcp add atelier -- node /absolute/path/to/atelier/server/dist/mcp/bin.js
 ```
 
-There is nothing else to configure. The pairing is implicit because only local
-processes can reach the port.
+**Over HTTP, from anywhere that can reach the daemon** — open the dashboard,
+go to **Connect**, and copy or download the `.mcp.json`. Drop it beside a
+project and Claude Code has the tools with no checkout, no Node and no build on
+that machine:
+
+```json
+{
+  "mcpServers": {
+    "atelier": {
+      "type": "http",
+      "url": "http://127.0.0.1:7717/mcp",
+      "headers": { "Authorization": "Bearer …" }
+    }
+  }
+}
+```
+
+The token in that file is the key to everything the daemon can do to a browser.
+It is not a repo file.
+
+## In Docker
+
+For a machine that would rather not install Node:
+
+```sh
+docker compose up -d
+```
+
+Then open the dashboard, take the `.mcp.json` off the **Connect** tab, and load
+the extension as above. The container holds the daemon only — your browser and
+your agent stay where they are, which is the whole point of it.
+
+`docker-compose.yaml` publishes the port to **`127.0.0.1` on the host and
+nowhere else**, and that is the security posture rather than a default worth
+changing. Inside a container loopback means the container, so the daemon binds
+`0.0.0.0` there and its own loopback check stands down; what keeps it private is
+the publish binding. Widen it to `7717:7717` and you have put a browser-driving
+API on the network.
+
+State lives on a named volume, so workflows, assets and the token survive a
+rebuild. Set `ATELIER_TOKEN` to pin the token instead of having one generated.
 
 ## Where to look
 
 **`http://127.0.0.1:7717`** — the dashboard. It updates live; there is nothing to
-refresh.
+refresh. **Connect** is where the `.mcp.json` lives.
 
 **Overview** opens with a little of everything — health, run success and assets as three
 figures, runs over the last fortnight, outcomes, and the top of each list — so the first
@@ -79,10 +121,15 @@ one anything choosing between assets later has to go on — including an agent, 
 `list_assets` rather than the pixels — so `describe_asset` writes it and `list_assets`
 returns it.
 
-The dashboard and the extension side panel are deliberately different things. The
-**side panel** is the action surface: the one or two things that need you, in the
-browser where you would act on them. The **dashboard** is the observation surface:
-everything, with detail, for when something is wrong and you want to look at it.
+The dashboard and the extension popup are deliberately different things. The
+**popup** behind the toolbar icon is the action surface: the one or two things that
+need you, in the browser where you would act on them. The **dashboard** is the
+observation surface: everything, with detail, for when something is wrong and you
+want to look at it.
+
+A popup closes when it loses focus, which is why it is not where a recording is
+driven from. While you are working in the page, the controls are on the bar over
+the page; the popup is where you look at what was heard.
 
 If the page will not load at all, the daemon is not running — `npm start`, or check
 `~/.atelier/atelierd.log`.
@@ -95,7 +142,7 @@ moment you are doing work for two different places, split them.
 
 The daemon has one **active project**, the way `kubectl` has one current context. The
 switcher at the top of the dashboard sidebar changes it, and it is what the browser
-extension records into — the side panel says which, so a recording cannot be filed
+extension records into — the popup says which, so a recording cannot be filed
 somewhere nobody is looking without the screen having said so.
 
 **An agent session is separate, deliberately.** It binds to a project of its own with
@@ -112,12 +159,17 @@ once per client rather than once ever.
 ## Recording a workflow
 
 1. Open the site, click the Atelier icon, hit **Record a workflow**, name it.
-2. Do the task once. Every click and every field is captured, and the side panel lists
-   them as they happen — so you can see it heard the right thing rather than trusting a
-   counter.
+2. Do the task once. Every click and every field is captured. Reopen the popup at any
+   point to see the list — so you can check it heard the right thing rather than
+   trusting a counter.
 3. Point at the result with **Capture result**. **It does not have to exist yet.**
    Click where it will appear and Atelier watches that region until something turns up.
 4. **Save recording.**
+
+**The bar can be dragged out of the way**, by anywhere that is not a control, and it
+cannot be dragged off the screen — a fixed overlay pushed past an edge is not scrolled
+back by anything, so it would simply be gone, Save with it. Where you put it is remembered
+for the tab, so a navigation does not send it back to the middle.
 
 **Why step 3 is the important one.** At the moment you click Generate, the thing you are
 waiting for does not exist, so there is nothing to click. A recorder that captures by
@@ -129,9 +181,21 @@ Use **Wait for…** for anything else the page has to do before the next step �
 appearing, a dialog closing. Hold Alt while pointing to wait for something to *go* rather
 than arrive.
 
+**Anything you type becomes a value the caller passes.** Typing something during a
+recording is what says it is a value somebody supplies — nobody types out a constant to
+demonstrate that it never changes. So every field you type into becomes a named input,
+taken from the field's label, and nothing has to be marked for the ordinary recording to
+come out right.
+
+**Save opens a review, in the page.** Every step, in order, with the text each one will
+actually type — the kept values as they stand, the rest shown as the `{{name}}` the agent
+will fill in. Tick **always this** on a field that is setup and Atelier keeps the text you
+typed instead of asking for it. That is the one decision in the whole recording, and the
+review is the only place it is made. Nothing is written until you press **Save workflow**.
+
 **Saving writes the workflow.** Atelier orders the selectors, inserts the waits, turns
-your longest typed value into a `{{placeholder}}` and works out what the workflow
-produces. The side panel shows you the result, step by step, and nothing runs until you
+every field you did not keep into a `{{placeholder}}`, and works out what the workflow
+produces. The popup shows you the result, step by step, and nothing runs until you
 press **Activate**. No other application is involved.
 
 **Passwords are never recorded** — not the value, and not as part of a selector. A
@@ -145,7 +209,7 @@ step quietly matching on its position in the page looks exactly like a step matc
 a stable test id, right up until the layout moves too.
 
 So replay reports which candidate won, and Atelier compares it to the one the step was
-recorded against. `workflow_health` and the side panel say what is decaying and how
+recorded against. `workflow_health` and the popup say what is decaying and how
 badly, before it breaks. When something has moved, **Re-record** that one step from the
 panel — the other nineteen were fine.
 
@@ -185,7 +249,7 @@ the words around it rot.
 ## When something goes wrong
 
 A job that hits a login wall, a captcha, a changed page, or a closed browser does not
-fail — it **parks**. You get one notification, the side panel shows what it needs, and
+fail — it **parks**. You get one notification, the popup shows what it needs, and
 **Resume** retries the exact step it stopped on. Claude is told to wait rather than
 retry.
 
