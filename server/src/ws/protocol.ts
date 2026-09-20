@@ -23,7 +23,7 @@ export type ServerMsg =
     }
   | { t: 'job.cancelled'; jobId: string }
   | { t: 'job.done'; jobId: string }
-  /** Everything the side panel renders. Pushed on every state change so the
+  /** Everything the popup renders. Pushed on every state change so the
    *  panel never polls and never computes. */
   | { t: 'state'; jobs: Job[]; drafts: number; workflows: { name: string; produces: string }[] }
   | { t: 'record.started'; draftName: string }
@@ -68,7 +68,7 @@ export type ClientMsg =
   /** One step re-recorded in place, to repair a workflow whose page moved
    *  rather than re-recording the whole thing. */
   | { t: 'step.rerecord'; workflowName: string; stepId: string; action: unknown }
-  /** Ask for a state frame now. The side panel opens at an arbitrary moment and
+  /** Ask for a state frame now. The popup opens at an arbitrary moment and
    *  the daemon only pushes on change, so without this a panel opened during a
    *  quiet period renders whatever the service worker last happened to cache. */
   | { t: 'state.request' }

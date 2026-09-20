@@ -23,7 +23,7 @@ export function interpolate(value: string, inputs: Record<string, string>): stri
 
 export interface RunnerDeps {
   hub: Hub
-  /** Called whenever job state changes, so the side panel can be pushed. */
+  /** Called whenever job state changes, so the popup can be pushed. */
   onChange: () => void
   /** Ask the OS to raise a notification. Injected so tests don't shell out. */
   notify?: (title: string, body: string) => void

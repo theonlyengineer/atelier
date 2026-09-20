@@ -17,10 +17,31 @@ export const ASSETS_DIR = join(HOME, 'assets')
 export const RUN_DIR = join(HOME, 'run')
 export const IPC_SOCKET = join(RUN_DIR, 'atelierd.sock')
 export const PORT_FILE = join(RUN_DIR, 'port')
+export const TOKEN_FILE = join(RUN_DIR, 'token')
 export const LOG_FILE = join(HOME, 'atelierd.log')
 
 /** Default HTTP/WS port. Overridable because 7717 could be taken. */
 export const DEFAULT_PORT = Number(process.env.ATELIER_PORT || 7717)
+
+/**
+ * The interface the daemon listens on. Loopback, unless something has taken
+ * responsibility for who can reach the socket.
+ *
+ * A container is that something: inside one, loopback means the container, so a
+ * daemon bound there is reachable by nothing at all. The supplied compose file
+ * sets this to 0.0.0.0 and then publishes the port to the *host's* loopback,
+ * which puts the boundary back where it was — at the edge of the machine —
+ * rather than removing it.
+ */
+export const BIND = process.env.ATELIER_BIND || '127.0.0.1'
+
+const LOOPBACK = ['127.0.0.1', '::1', '::ffff:127.0.0.1']
+
+export const isLoopback = (address: string): boolean => LOOPBACK.includes(address)
+
+/** True when the daemon has been told to listen beyond loopback, in which case
+ *  a request's remote address is no longer evidence of anything. */
+export const boundBeyondLoopback = (): boolean => !isLoopback(BIND)
 
 export function ensureDirs(): void {
   for (const dir of [HOME, ASSETS_DIR, RUN_DIR]) {

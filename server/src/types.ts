@@ -97,7 +97,7 @@ export interface Job {
   status: JobStatus
   stepIndex: number
   stepCount: number
-  /** Human-readable reason the job is parked, shown in the side panel. */
+  /** Human-readable reason the job is parked, shown in the popup. */
   blockedReason: string | null
   error: string | null
   assetIds: string[]

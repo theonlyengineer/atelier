@@ -11,7 +11,19 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import { writeFileSync, appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { DEFAULT_PORT, PORT_FILE, ensureDirs, LOG_FILE, HOME, blobPath } from './paths.ts'
+import {
+  DEFAULT_PORT,
+  PORT_FILE,
+  ensureDirs,
+  LOG_FILE,
+  HOME,
+  blobPath,
+  BIND,
+  isLoopback,
+  boundBeyondLoopback,
+} from './paths.ts'
+import { readOrCreateToken } from './core/token.ts'
+import { createMcpEndpoint } from './mcp/http.ts'
 import { open } from './db/index.ts'
 import * as repo from './db/repo.ts'
 import { assessWorkflow } from './core/health.ts'
@@ -23,6 +35,25 @@ import { dashboardHtml } from './http/dashboard.ts'
 import type { ClientMsg } from './ws/protocol.ts'
 
 export const VERSION = '0.1.0'
+
+/**
+ * The `.mcp.json` a person downloads from the dashboard and drops beside a
+ * project on any machine that can reach this daemon.
+ *
+ * The URL is written as loopback because that is what the supplied compose file
+ * publishes; point it somewhere else by hand if the daemon is somewhere else.
+ */
+export function mcpConfig(port: number): unknown {
+  return {
+    mcpServers: {
+      atelier: {
+        type: 'http',
+        url: `http://127.0.0.1:${port}/mcp`,
+        headers: { Authorization: `Bearer ${readOrCreateToken()}` },
+      },
+    },
+  }
+}
 
 const log = (...parts: unknown[]) => {
   const line = `${new Date().toISOString()} ${parts.map(String).join(' ')}\n`
@@ -213,11 +244,21 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
   })
   deps = { hub, runner, version: VERSION, overview }
 
+  // `deps` is assigned above but read lazily, because a session opened later
+  // must see the same instances the rest of the daemon is using.
+  const mcp = createMcpEndpoint(() => deps, log)
+
   const server = createServer(async (req, res) => {
-    // Loopback only. The daemon binds 127.0.0.1 as well, so this is belt and
-    // braces against a proxy in front of it.
+    // Loopback only, while loopback still means something.
+    //
+    // It stops meaning anything inside a container, where every request arrives
+    // from a bridge gateway however it was published — so the check is skipped
+    // exactly when the daemon has been told to bind beyond loopback, and the
+    // boundary becomes whatever published the port (the compose file publishes
+    // to the host's loopback) plus the token on /mcp. The check is not softened
+    // for the ordinary case, which is still the one almost everybody runs.
     const remote = req.socket.remoteAddress ?? ''
-    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remote)) {
+    if (!boundBeyondLoopback() && !isLoopback(remote)) {
       return json(res, 403, { error: 'loopback only' })
     }
 
@@ -228,6 +269,10 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
       res.writeHead(204, {
         'access-control-allow-origin': '*',
         'access-control-allow-methods': 'GET,POST,OPTIONS',
+        // `authorization` is deliberately absent. Only the extension needs CORS,
+        // and it never sends the token — so a page in the browser cannot
+        // preflight a token-bearing request at the daemon. Adding it here to
+        // "be consistent" would hand every visited site the MCP endpoint.
         'access-control-allow-headers': 'content-type,x-atelier-job,x-atelier-mime,x-atelier-prompt',
       })
       return res.end()
@@ -235,6 +280,34 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
     res.setHeader('access-control-allow-origin', '*')
 
     if (url.pathname === '/health') return json(res, 200, { ok: true, version: VERSION })
+
+    // The MCP surface, for an agent pointed at a URL rather than given a process
+    // to spawn. The token is the boundary here: inside a container the remote
+    // address check above is off, and this is the one endpoint that can drive a
+    // browser.
+    if (url.pathname === '/mcp') {
+      const offered = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+      if (offered !== readOrCreateToken()) {
+        return json(res, 401, { error: 'bad or missing token — see the dashboard for the .mcp.json' })
+      }
+      return mcp.handle(req, res)
+    }
+
+    // The config file the dashboard offers for download. It carries the token,
+    // so it is the one response that must not be readable cross-origin: the
+    // wildcard set above would otherwise let any page the human visits read the
+    // credential and drive their browser through it.
+    if (url.pathname === '/mcp.json' && req.method === 'GET') {
+      res.removeHeader('access-control-allow-origin')
+      const body = JSON.stringify(mcpConfig(port), null, 2) + '\n'
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        'content-disposition': 'attachment; filename=".mcp.json"',
+        'cache-control': 'no-store',
+      })
+      return res.end(body)
+    }
 
     if (url.pathname === '/' && req.method === 'GET') {
       const html = dashboardHtml(VERSION)
@@ -376,11 +449,12 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
-    server.listen(port, '127.0.0.1', resolve)
+    server.listen(port, BIND, resolve)
   })
 
   writeFileSync(PORT_FILE, String(port))
-  log(`atelierd ${VERSION} listening on 127.0.0.1:${port}`)
+  log(`atelierd ${VERSION} listening on ${BIND}:${port}`)
+  log(`mcp endpoint at http://127.0.0.1:${port}/mcp — config at /mcp.json`)
 
   /**
    * A parked job notifies once. If the browser was shut, or the notification

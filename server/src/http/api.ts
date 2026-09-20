@@ -26,7 +26,7 @@ type Handler = (body: any, deps: ApiDeps) => unknown
 
 /**
  * Verbs that only read. Everything else changes something, and the dashboard
- * and side panel have to be told.
+ * and popup have to be told.
  *
  * Framed this way round on purpose: a new route that mutates and forgets to
  * announce it is a control that silently does nothing, which is precisely what
@@ -75,7 +75,7 @@ export const routes: Record<string, Handler> = {
   }),
 
   /** Everything a client needs to render: status, jobs, workflows, assets.
-   *  The dashboard streams this over SSE; the side panel polls it. */
+   *  The dashboard streams this over SSE; the popup polls it. */
   '/api/overview': (_b, d) => d.overview(),
 
   '/api/jobs.resume': (b, d) => ({ job: d.runner.resume(b?.id ?? missing('id')) }),

@@ -1,0 +1,31 @@
+# Atelier, for a machine that would rather not install Node.
+#
+#   docker compose up -d
+#   open http://127.0.0.1:7717  →  Connect  →  Download
+#
+# Drop that .mcp.json beside a project and Claude Code has the tools. The
+# extension finds the daemon by itself, as it always did.
+
+services:
+  atelier:
+    build: .
+    image: atelier
+    # 127.0.0.1 on the left is the whole security posture, and the reason the
+    # daemon's own loopback check is allowed to stand down inside the container:
+    # the port is reachable from this machine and from nowhere else. Widen it to
+    # "7717:7717" and you have published a browser-driving API to the network.
+    ports:
+      - '127.0.0.1:7717:7717'
+    volumes:
+      # Workflows, assets, the log and the token. Losing this means re-recording
+      # everything, so it is a named volume rather than an anonymous one.
+      - atelier-data:/data
+    environment:
+      # Pin the token to keep one .mcp.json valid across a `docker compose down
+      # -v`. Left unset, the daemon generates one into the volume and shows it
+      # on the dashboard — which is what most people want.
+      ATELIER_TOKEN: ${ATELIER_TOKEN:-}
+    restart: unless-stopped
+
+volumes:
+  atelier-data:
