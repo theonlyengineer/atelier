@@ -268,18 +268,45 @@
 
   const MEDIA_TAGS = ['IMG', 'VIDEO', 'AUDIO', 'CANVAS', 'PICTURE', 'FIGURE', 'SVG']
 
+  /**
+   * The control an element stands for, which is not always the element itself.
+   *
+   * Web components mirror their attributes onto the host and keep the real
+   * control inside, so pointing at what looks like the text box very often
+   * lands on a wrapper. Offering that wrapper nothing but Click would be the
+   * same bug replay had, seen from the other end — and replay descends the same
+   * way, so what the action list promises is what the step will do.
+   *
+   * One control inside is that control; several is ambiguous and the element
+   * stands only for itself.
+   */
+  const CONTROLS = 'input, textarea, select, [contenteditable=""], [contenteditable="true"]'
+
+  function controlOf(el) {
+    if (!el) return null
+    if (isEditable(el) || el.tagName === 'SELECT') return el
+    const inside = [...(el.querySelectorAll?.(CONTROLS) || [])].filter(
+      (n) => !n.disabled && !(n instanceof HTMLInputElement && n.type === 'hidden'),
+    )
+    return inside.length === 1 ? inside[0] : null
+  }
+
   /** What this element is, in the terms the action list needs. */
   function inspect(el) {
     const tag = el.tagName
-    const type = (el.getAttribute('type') || '').toLowerCase()
-    const editable = isEditable(el) && !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(type)
+    // The affordances come from the control; the identity comes from what was
+    // pointed at, because that is what the person will read on the step.
+    const field = controlOf(el) ?? el
+    const type = (field.getAttribute?.('type') || '').toLowerCase()
+    const editable =
+      isEditable(field) && !['checkbox', 'radio', 'button', 'submit', 'reset'].includes(type)
     return {
       tag,
       type,
       editable,
-      secret: isSecret(el),
-      select: tag === 'SELECT',
-      checkable: tag === 'INPUT' && ['checkbox', 'radio'].includes(type),
+      secret: isSecret(field),
+      select: field.tagName === 'SELECT',
+      checkable: field.tagName === 'INPUT' && ['checkbox', 'radio'].includes(type),
       button:
         tag === 'BUTTON' ||
         (tag === 'A' && !!el.href) ||
@@ -288,8 +315,11 @@
       media: MEDIA_TAGS.includes(tag) || !!el.querySelector?.('img, video, audio, canvas'),
       download: tag === 'A' && el.hasAttribute('download'),
       hasText: !!(el.textContent || '').trim(),
-      hasPlaceholder: !!el.getAttribute('placeholder'),
-      options: tag === 'SELECT' ? [...el.options].map((o) => o.text.trim()).filter(Boolean) : [],
+      hasPlaceholder: !!(el.getAttribute('placeholder') || field.getAttribute?.('placeholder')),
+      options:
+        field.tagName === 'SELECT'
+          ? [...field.options].map((o) => o.text.trim()).filter(Boolean)
+          : [],
     }
   }
 
@@ -842,9 +872,12 @@
       const available = actionsFor(picked.info)
       picked.action = available[0]?.id ?? 'click'
       // Seed the value from what the field already holds, minus anything we
-      // refuse to record. Most of the time it is what they want to type again.
+      // refuse to record. Most of the time it is what they want to type again —
+      // and it comes from the control rather than the wrapper, which mirrors
+      // the placeholder but never the text.
       if (!picked.info.secret && picked.info.editable) {
-        picked.value = el.value ?? el.innerText ?? ''
+        const field = controlOf(el) ?? el
+        picked.value = field.value ?? field.innerText ?? ''
       }
       flash(el, '#ff6552')
       renderCompose()

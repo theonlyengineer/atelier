@@ -1131,3 +1131,125 @@ test('the question comes at Save, not at the start', skip, async () => {
   assert.match(first as string, /name this workflow/i)
   await page.close()
 })
+
+/* ------------------------------------------------- wrappers around fields */
+
+/**
+ * A control that is not the element a selector lands on.
+ *
+ * Web components very often mirror their attributes onto the host and keep the
+ * real control inside — so `[placeholder="Ask anything"]` matches the wrapper,
+ * which comes first in document order, and the textarea that actually holds the
+ * text is a child of it.
+ *
+ * The old code took whatever resolved and applied `HTMLInputElement`'s native
+ * value setter to it, which throws **"Illegal invocation"** — a browser
+ * internals message, surfaced to somebody who was simply typing into a box.
+ */
+
+const WRAPPED = `
+  <x-box placeholder="Ask anything" aria-label="Prompt">
+    <textarea placeholder="Ask anything"></textarea>
+  </x-box>`
+
+test('typing reaches the control inside a wrapper that resolved instead of it', skip, async () => {
+  const page = await replayPage(WRAPPED)
+  // The selector really does land on the wrapper; that is the whole situation.
+  assert.equal(
+    await page.evaluate(`document.querySelector('[placeholder="Ask anything"]').tagName`),
+    'X-BOX',
+  )
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'type', timeoutMs: 1000, value: 'hello there', target: 'Ask anything',
+    selectors: [{ strategy: 'placeholder', value: '[placeholder="Ask anything"]', score: 76 }],
+  })`)) as any
+  assert.equal(result.ok, true, result.reason)
+  assert.equal(await page.evaluate(`document.querySelector('textarea').value`), 'hello there')
+  await page.close()
+})
+
+test('a wrapper holding more than one field is refused, not guessed at', skip, async () => {
+  // One control inside a wrapper *is* that control. Several is ambiguous, and
+  // typing into whichever came first would silently fill the wrong box.
+  const page = await replayPage(
+    `<div id="form"><input id="a" placeholder="First"><input id="b" placeholder="Second"></div>`,
+  )
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'type', timeoutMs: 800, value: 'x', target: 'the form',
+    selectors: [{ strategy: 'id', value: '#form', score: 92 }],
+  })`)) as any
+  assert.equal(result.ok, false)
+  assert.equal(result.recoverable, true)
+  assert.match(result.reason, /more than one/i)
+  assert.equal(await page.evaluate(`document.querySelector('#a').value`), '')
+  await page.close()
+})
+
+test('an element that holds no field at all says so in words', skip, async () => {
+  const page = await replayPage(`<div id="nothing">just text</div>`)
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'type', timeoutMs: 800, value: 'x', target: 'the box',
+    selectors: [{ strategy: 'id', value: '#nothing', score: 92 }],
+  })`)) as any
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /the box/)
+  // Never a browser internals message. "Illegal invocation" told a person
+  // typing into a box precisely nothing they could act on.
+  assert.doesNotMatch(result.reason, /illegal invocation/i)
+  await page.close()
+})
+
+test('ticking reaches the checkbox inside a wrapper too', skip, async () => {
+  const page = await replayPage(`<x-check id="w"><input type="checkbox"></x-check>`)
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'check', timeoutMs: 1000, target: 'Remember me',
+    selectors: [{ strategy: 'id', value: '#w', score: 92 }],
+  })`)) as any
+  assert.equal(result.ok, true, result.reason)
+  assert.equal(await page.evaluate(`document.querySelector('input').checked`), true)
+  await page.close()
+})
+
+test('choosing an option reaches a select inside a wrapper', skip, async () => {
+  const page = await replayPage(
+    `<x-sel id="w"><select><option value="s">Small</option><option value="l">Large</option></select></x-sel>`,
+  )
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'select', timeoutMs: 1000, value: 'Large', target: 'Size',
+    selectors: [{ strategy: 'id', value: '#w', score: 92 }],
+  })`)) as any
+  assert.equal(result.ok, true, result.reason)
+  assert.equal(await page.evaluate(`document.querySelector('select').value`), 'l')
+  await page.close()
+})
+
+test('a hidden or disabled field inside a wrapper is not the one meant', skip, async () => {
+  const page = await replayPage(
+    `<x-box id="w"><input type="hidden" name="csrf"><textarea placeholder="Say something"></textarea></x-box>`,
+  )
+  const result = (await page.evaluate(`window.__atelierReplay({
+    id: 's', kind: 'type', timeoutMs: 1000, value: 'hello', target: 'Say something',
+    selectors: [{ strategy: 'id', value: '#w', score: 92 }],
+  })`)) as any
+  assert.equal(result.ok, true, result.reason)
+  assert.equal(await page.evaluate(`document.querySelector('textarea').value`), 'hello')
+  await page.close()
+})
+
+test('pointing at a wrapper offers the actions of the control inside it', skip, async () => {
+  // The mirror image of the same problem: point at the wrapper and the action
+  // list used to offer Click and nothing else, because the wrapper is not
+  // itself a field.
+  const page = await pageWith(WRAPPED)
+  await page.click('#atelier-root [data-act="pick"]')
+  // Dispatched on the wrapper itself: clicking its middle lands on the textarea
+  // inside it, which is not the case under test.
+  await page.evaluate(`document.querySelector('x-box').click()`)
+  await page.waitForSelector('#atelier-root .at-card')
+  const ids = (await page.evaluate(
+    `[...document.querySelectorAll('#atelier-root [data-role="action"] option')].map(o => o.value)`,
+  )) as string[]
+  assert.equal(ids[0], 'type')
+  assert.ok(ids.includes('clear'))
+  await page.close()
+})

@@ -161,6 +161,24 @@ only. The panel therefore re-reads the recording with `record.state` after every
 change rather than waiting to be told — which is also why the worker is the only
 thing that holds it.
 
+**A selector lands on an element; a step acts on a control, and they are often
+not the same one.** Web components very commonly mirror their attributes onto
+the host and keep the real control inside, so `[placeholder="…"]` matches the
+wrapper — first in document order — and the textarea is a child of it. Both
+sides resolve through to the control: `replay.js` before acting, `recorder.js`
+before deciding what the action list may offer, so what the panel promises is
+what the step does. **One control inside a wrapper is that control; more than
+one is ambiguous and the step refuses**, because typing into whichever came
+first is not a mistake anyone notices quickly.
+
+**Never hand a native setter a receiver it does not belong to.** The value
+setter is taken off `HTMLInputElement.prototype` because a framework's own
+property descriptor sits on top of it — and calling it on anything that is not
+exactly that type throws `Illegal invocation`, which is a browser internals
+message shown to somebody who was typing into a box. `setValue` picks the
+prototype from what the element *is*, and falls back to a plain assignment for
+anything else rather than throwing.
+
 **Everything Atelier draws lives under `#atelier-root`, and that root is in the
 top layer.** A site's own sheet — `showModal()`, or the popover API — paints in
 the top layer, which is above *every* z-index; 2147483647 is the largest number

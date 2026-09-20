@@ -157,6 +157,28 @@ element, skipping anything inside Atelier's own `#atelier-root` — the control
 panel is in the document while a step is being recorded, and it is performed
 through this same executor at that moment.
 
+## The element and the control
+
+A selector resolves to an element. A step acts on a *control*, and on a modern
+page those are often not the same one: web components mirror their attributes
+onto the host and keep the real control inside, so `[placeholder="Ask"]` matches
+the wrapper, which comes first in document order, while the textarea holding the
+text is its child.
+
+So both sides resolve through. Replay descends before acting; the recorder
+descends before deciding which actions an element can take, so the list the
+panel offers is the list the step can carry out. The rule is the same in both:
+**one control inside a wrapper is that control, and more than one is
+ambiguous** — a step pointed at a form with five fields refuses rather than
+filling in whichever came first.
+
+This surfaced as `Illegal invocation`, which is what the browser says when a
+native setter is called on a receiver of the wrong type. The value setter is
+taken off `HTMLInputElement.prototype` deliberately, because a framework's own
+property descriptor sits on top of it and assigning `.value` would be swallowed;
+applied to a custom element, it throws. It is now chosen from what the element
+is, and anything unexpected degrades to a plain assignment instead of exploding.
+
 ## Waiting, and why there is no observer
 
 A page changes a variable amount of time after the previous step: a route

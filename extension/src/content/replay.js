@@ -158,6 +158,58 @@
     return false
   }
 
+  /**
+   * The control a step actually means, which is not always the element its
+   * selector landed on.
+   *
+   * Web components very commonly mirror their attributes onto the host and keep
+   * the real control inside, so `[placeholder="Ask anything"]` matches the
+   * wrapper — first in document order — and the textarea holding the text is a
+   * child of it. Taking whatever resolved and applying a native value setter to
+   * it throws "Illegal invocation", which is a browser internals message shown
+   * to somebody who was simply typing into a box.
+   *
+   * One control inside a wrapper *is* that control. Several is ambiguous, and
+   * the caller refuses rather than filling in whichever happens to come first —
+   * typing into the wrong box is not a mistake anyone notices quickly.
+   */
+  const CONTROLS = 'input, textarea, select, [contenteditable=""], [contenteditable="true"]'
+
+  const holdsValue = (el) =>
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement ||
+    el?.isContentEditable === true
+
+  /** A control is not a candidate if the page has put it beyond use, and a
+   *  hidden input is plumbing rather than something anyone typed into. */
+  const usable = (el) =>
+    !el.disabled && !el.readOnly && !(el instanceof HTMLInputElement && el.type === 'hidden')
+
+  function controlsIn(el, selector = CONTROLS, own = holdsValue) {
+    if (!el) return []
+    if (own(el) && usable(el)) return [el]
+    return [...(el.querySelectorAll?.(selector) || [])].filter(usable)
+  }
+
+  /** The one control here, or null when there is none or more than one. */
+  const oneControlIn = (el, selector, own) => {
+    const found = controlsIn(el, selector, own)
+    return found.length === 1 ? found[0] : null
+  }
+
+  const named = (step) => step.target || step.note || step.kind
+
+  /** Why a step could not find something to act on, in words a person can use. */
+  function noControl(step, el, selector, own) {
+    const how = controlsIn(el, selector, own).length > 1 ? 'more than one' : 'nothing'
+    return {
+      ok: false,
+      reason: `"${named(step)}" matched an element holding ${how} that this step can act on — point the step at the control itself`,
+      recoverable: true,
+    }
+  }
+
   /** Set a value the way a framework notices — React and Vue both listen for
    *  input/change rather than reading .value on their own schedule. */
   function setValue(el, value) {
@@ -202,8 +254,18 @@
       return
     }
 
-    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement : HTMLInputElement
-    const setter = Object.getOwnPropertyDescriptor(proto.prototype, 'value')?.set
+    // The native setter is the one a framework's own property descriptor sits
+    // on top of, which is why it is reached for — but calling it on anything
+    // that is not of that exact type throws "Illegal invocation". Guarded by
+    // what the element *is* rather than by what it is not, so a caller that
+    // hands this something unexpected degrades instead of exploding.
+    const proto =
+      el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement
+        : el instanceof HTMLInputElement
+          ? HTMLInputElement
+          : null
+    const setter = proto && Object.getOwnPropertyDescriptor(proto.prototype, 'value')?.set
     if (setter) setter.call(el, value)
     else el.value = value
     el.dispatchEvent(new Event('input', { bubbles: true }))
@@ -291,20 +353,25 @@
           el.click()
           break
         case 'type':
-          setValue(el, step.value ?? '')
+        case 'select': {
+          const field = oneControlIn(el)
+          if (!field) return noControl(step, el)
+          setValue(field, step.value ?? '')
           break
-        case 'select':
-          setValue(el, step.value ?? '')
-          break
+        }
         // Set rather than toggled, and only when it is not already there: a
         // toggle replayed against a box that happens to start the other way
         // round produces the opposite of what was recorded, which is the kind
         // of bug that only shows up on someone else's account.
         case 'check':
         case 'uncheck': {
+          const TICKABLE = 'input[type="checkbox"], input[type="radio"]'
+          const ticks = (n) => n instanceof HTMLInputElement && ['checkbox', 'radio'].includes(n.type)
+          const box = oneControlIn(el, TICKABLE, ticks)
+          if (!box) return noControl(step, el, TICKABLE, ticks)
           const wanted = step.kind === 'check'
-          if (el.checked !== wanted) el.click()
-          if (el.checked !== wanted) {
+          if (box.checked !== wanted) box.click()
+          if (box.checked !== wanted) {
             return {
               ok: false,
               reason: `could not ${wanted ? 'tick' : 'untick'} "${step.target || step.kind}" — it may be disabled`,
@@ -333,12 +400,15 @@
             // prompting for" are different questions, and only the person who
             // recorded the step knows which they meant — so they said.
             const from = step.capture?.from || 'auto'
+            // A wrapper mirrors the placeholder but not the typed text, so
+            // "what is in this field" has to come from the field.
+            const field = oneControlIn(el) ?? el
             const value =
               from === 'placeholder'
-                ? (el.getAttribute?.('placeholder') ?? '')
+                ? (el.getAttribute?.('placeholder') ?? field.getAttribute?.('placeholder') ?? '')
                 : from === 'value'
-                  ? (el.value ?? el.textContent ?? '')
-                  : (el.value ?? el.innerText ?? el.textContent ?? '')
+                  ? (field.value ?? field.textContent ?? '')
+                  : (field.value ?? el.innerText ?? el.textContent ?? '')
             if (!String(value).trim()) {
               return { ok: false, reason: 'the captured element was empty', recoverable: true }
             }
