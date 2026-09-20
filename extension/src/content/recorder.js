@@ -172,14 +172,47 @@
     return out
   }
 
+  /**
+   * What an element says, as a person would read it aloud.
+   *
+   * `textContent` is the wrong tool and produced the wrong names. It
+   * concatenates every descendant with no regard for how they are laid out, so
+   * a list row holding a title and a description in separate blocks came back
+   * as one run-on string — "NewscasterProfessional, authoritative, clear
+   * articulation with standard broadcas" — chopped mid-word at the length cap
+   * and then used as the step's name *and* as a selector.
+   *
+   * `innerText` respects the rendering, so a block boundary is a newline, and
+   * the first line of a thing is what it is called. The rest is its
+   * description, which belongs to the page and not to the step.
+   */
+  const NAME_MAX = 60
+
+  function shorten(text) {
+    if (text.length <= NAME_MAX) return text
+    const cut = text.slice(0, NAME_MAX)
+    const space = cut.lastIndexOf(' ')
+    // Cut at a word, unless the first word is itself longer than the cap.
+    return (space > 20 ? cut.slice(0, space) : cut).trimEnd() + '\u2026'
+  }
+
+  function readableName(el) {
+    const raw = el?.innerText ?? el?.textContent ?? ''
+    const line = String(raw)
+      .split('\n')
+      .map((part) => part.trim())
+      .find(Boolean)
+    return shorten((line ?? '').replace(/\s+/g, ' '))
+  }
+
   /** The label a form control is given by a <label> pointing at it. */
   function labelText(el) {
     if (el.id) {
       const tag = document.querySelector(`label[for="${esc(el.id)}"]`)
-      if (tag) return (tag.textContent || '').trim()
+      if (tag) return readableName(tag)
     }
     const wrapping = el.closest?.('label')
-    return wrapping ? (wrapping.textContent || '').trim() : ''
+    return wrapping ? readableName(wrapping) : ''
   }
 
   /**
@@ -190,12 +223,12 @@
    * else falls back to whatever it was given to be identified by.
    */
   function suggestIdentifier(el) {
-    const text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80)
-    const aria = (el.getAttribute('aria-label') || '').trim()
-    const placeholder = (el.getAttribute('placeholder') || '').trim()
-    const alt = (el.getAttribute('alt') || '').trim()
-    const title = (el.getAttribute('title') || '').trim()
-    const label = labelText(el).replace(/\s+/g, ' ').slice(0, 80)
+    const text = readableName(el)
+    const aria = shorten((el.getAttribute('aria-label') || '').trim())
+    const placeholder = shorten((el.getAttribute('placeholder') || '').trim())
+    const alt = shorten((el.getAttribute('alt') || '').trim())
+    const title = shorten((el.getAttribute('title') || '').trim())
+    const label = shorten(labelText(el).replace(/\s+/g, ' '))
 
     if (isEditable(el) || el.tagName === 'SELECT') {
       if (placeholder) return { value: placeholder, strategy: 'placeholder', how: 'its placeholder' }
@@ -203,7 +236,7 @@
       if (label) return { value: label, strategy: 'label', how: 'the label beside it' }
       if (el.name) return { value: el.name, strategy: 'name', how: 'its form name' }
     }
-    if (text && text.length <= 80) return { value: text, strategy: 'text', how: 'its text' }
+    if (text) return { value: text, strategy: 'text', how: 'its text' }
     if (aria) return { value: aria, strategy: 'aria', how: 'its label' }
     if (alt) return { value: alt, strategy: 'alt', how: 'its alt text' }
     if (title) return { value: title, strategy: 'title', how: 'its title' }

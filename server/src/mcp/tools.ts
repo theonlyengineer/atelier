@@ -587,6 +587,30 @@ export function buildServer(session: Session): McpServer {
   )
 
   server.registerTool(
+    'delete_asset',
+    {
+      title: 'Delete generated assets',
+      description:
+        'Remove one asset or several. The bytes go and cannot be recovered; the run that produced them is left alone, because the asset is the output and the job is the record of what happened. Reach for it when something was generated wrong and would otherwise sit in the list being offered for reuse — and say which ones you are removing before you do, since the human cannot see this list while you work.',
+      inputSchema: {
+        ids: z
+          .array(z.string())
+          .min(1)
+          .describe('Asset ids, from run_workflow or list_assets.'),
+      },
+    },
+    async ({ ids }) => {
+      try {
+        const res = await call<{ deleted: string[]; missing: string[] }>('/api/assets.delete', { ids })
+        const gone = `Deleted ${res.deleted.length} asset${res.deleted.length === 1 ? '' : 's'}.`
+        return text(res.missing.length ? `${gone} Not found: ${res.missing.join(', ')}` : gone)
+      } catch (e) {
+        return fail((e as Error).message)
+      }
+    },
+  )
+
+  server.registerTool(
     'delete_workflow',
     {
       title: 'Delete a workflow',

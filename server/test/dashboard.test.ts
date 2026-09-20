@@ -1171,3 +1171,181 @@ test('Download hands over a file rather than navigating the dashboard away', ski
   assert.equal(attr, '.mcp.json')
   await page.close()
 })
+
+/* ------------------------------------------------- assets that are not images */
+
+/**
+ * An asset is whatever a workflow captured, and that was never only pictures.
+ *
+ * The grid drew an `<img>` for `image/*` and a blank square for everything
+ * else, and the viewer held one `<img>` full stop — so an audio clip, a video,
+ * a PDF and a captured block of text all opened as a broken picture. The mime
+ * has travelled with every asset since the beginning; nothing new had to be
+ * stored to tell them apart.
+ */
+
+/** A tiny but genuine file of each kind, so nothing renders from a lie. */
+async function seedKinds() {
+  const assets = await import('../src/core/assets.ts')
+  const png = Buffer.from(
+    '89504e470d0a1a0a0000000d49484452000000040000000408060000' + '00'.repeat(20),
+    'hex',
+  )
+  const made: Record<string, string> = {}
+  const kinds: Array<[string, string, Buffer]> = [
+    ['image', 'image/png', png],
+    ['audio', 'audio/mpeg', Buffer.from('ID3' + 'x'.repeat(40))],
+    ['video', 'video/webm', Buffer.from('\u001aEß£' + 'x'.repeat(40))],
+    ['pdf', 'application/pdf', Buffer.from('%PDF-1.4\n' + 'x'.repeat(40))],
+    ['text', 'text/plain', Buffer.from('the captured answer, in full')],
+    ['other', 'application/zip', Buffer.from('PK\u0003\u0004' + 'x'.repeat(40))],
+  ]
+  for (const [name, mime, bytes] of kinds) {
+    made[name] = assets.store(bytes, { mime, prompt: 'seed ' + name }).id
+  }
+  return made
+}
+
+test('every kind of asset is drawn as the thing it is, not as a blank square', skip, async () => {
+  const project = repo.createProject('Assets By Kind')
+  repo.setActiveProject(project.id)
+  const made = await seedKinds()
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length >= 6`, { timeout: 8000 })
+
+  // Scoped to the grid on purpose: the overview's strip of recent assets
+  // carries data-asset as well and comes first in the document, so an unscoped
+  // selector reads the wrong element and reports on a thumbnail that is not
+  // the one under test.
+  const shape = async (id: string) =>
+    page.evaluate(`(() => {
+      const tile = document.querySelector('#assets [data-asset="${id}"]')
+      const thumb = tile.querySelector('.thumb')
+      return { tag: thumb.tagName.toLowerCase(), label: thumb.textContent.trim() }
+    })()`)
+
+  assert.equal(((await shape(made.image!)) as any).tag, 'img')
+  // A video really can show itself; the rest say what they are in words.
+  assert.equal(((await shape(made.video!)) as any).tag, 'video')
+  assert.deepEqual(await shape(made.audio!), { tag: 'span', label: 'mpeg' })
+  assert.deepEqual(await shape(made.pdf!), { tag: 'span', label: 'pdf' })
+  assert.deepEqual(await shape(made.text!), { tag: 'span', label: 'plain' })
+  assert.deepEqual(await shape(made.other!), { tag: 'span', label: 'zip' })
+  await page.close()
+})
+
+test('opening one gives you something that can actually play or render it', skip, async () => {
+  const made = await seedKinds()
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length > 0`, { timeout: 8000 })
+
+  const stageOf = async (id: string) => {
+    await page.evaluate(`document.querySelector('#assets [data-asset="${id}"]').click()`)
+    await page.waitForFunction(`document.querySelector('#viewer').open`, { timeout: 4000 })
+    const tag = await page.evaluate(
+      `document.querySelector('#v-stage img, #v-stage video, #v-stage audio, #v-stage iframe, #v-stage pre')?.tagName.toLowerCase()`,
+    )
+
+    await page.evaluate(`document.querySelector('#viewer').close()`)
+    return tag
+  }
+
+  assert.equal(await stageOf(made.image!), 'img')
+  assert.equal(await stageOf(made.audio!), 'audio')
+  assert.equal(await stageOf(made.video!), 'video')
+  assert.equal(await stageOf(made.pdf!), 'iframe')
+  assert.equal(await stageOf(made.text!), 'pre')
+  await page.close()
+})
+
+test('a captured block of text is read, not framed', skip, async () => {
+  const made = await seedKinds()
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length > 0`, { timeout: 8000 })
+  await page.evaluate(`document.querySelector('#assets [data-asset="${made.text}"]').click()`)
+  await page.waitForFunction(
+    `(document.querySelector('#v-text')?.textContent || '').includes('captured answer')`,
+    { timeout: 6000 },
+  )
+  await page.evaluate(`document.querySelector('#viewer').close()`)
+  await page.close()
+})
+
+/* ------------------------------------------------------------ bulk delete */
+
+test('nothing selected means no toolbar at all', skip, async () => {
+  // A bar that is always there, mostly disabled, is a bar people stop reading.
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length > 0`, { timeout: 8000 })
+  assert.equal(await page.evaluate(`document.getElementById('bulk').hidden`), true)
+  await page.close()
+})
+
+test('a selection can be deleted in one decision', skip, async () => {
+  const project = repo.createProject('Bulk Delete')
+  repo.setActiveProject(project.id)
+  const made = await seedKinds()
+  const doomed = [made.audio!, made.pdf!, made.other!]
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length >= 6`, { timeout: 8000 })
+
+  for (const id of doomed) await page.click(`[data-pick="${id}"]`)
+  await page.waitForFunction(`!document.getElementById('bulk').hidden`, { timeout: 4000 })
+  assert.equal(await page.evaluate(`document.getElementById('bulk-count').textContent`), '3 selected')
+
+  await page.click('#bulk-delete')
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  await page.click('#ask-go')
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length === 3`, { timeout: 8000 })
+
+  for (const id of doomed) assert.equal(repo.getAsset(id), null, 'gone from the database')
+  assert.ok(repo.getAsset(made.image!), 'and nothing else went with them')
+  assert.equal(await page.evaluate(`document.getElementById('bulk').hidden`), true, 'the bar stands down')
+  await page.close()
+})
+
+test('deleting a selection asks first, and declining keeps every one', skip, async () => {
+  const made = await seedKinds()
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length > 0`, { timeout: 8000 })
+  await page.click(`[data-pick="${made.text}"]`)
+  await page.click('#bulk-delete')
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  await page.click('#ask-stop')
+  await new Promise((r) => setTimeout(r, 500))
+  assert.ok(repo.getAsset(made.text!), 'declining leaves it alone')
+  await page.close()
+})
+
+test('a selection cannot outlive what is in it', skip, async () => {
+  // An asset deleted from somewhere else must not stay ticked and come back on
+  // the next Delete, taking an id that now belongs to nothing.
+  const project = repo.createProject('Stale Selection')
+  repo.setActiveProject(project.id)
+  const made = await seedKinds()
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#assets'`)
+  await page.waitForFunction(`document.querySelectorAll('#assets .tile').length >= 6`, { timeout: 8000 })
+  await page.click(`[data-pick="${made.pdf}"]`)
+  await page.waitForFunction(`document.getElementById('bulk-count').textContent === '1 selected'`)
+
+  // Removed behind the page's back, the way an agent would — through the API,
+  // so the daemon announces it. A direct repo call changes the database and
+  // tells nobody, which is not how anything else removes an asset.
+  await fetch(`http://127.0.0.1:${PORT}/api/assets.delete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ids: [made.pdf] }),
+  })
+  await page.waitForFunction(`document.getElementById('bulk').hidden === true`, { timeout: 8000 })
+  await page.close()
+})

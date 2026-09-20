@@ -720,17 +720,19 @@ async function popupWith(
   origin = 'https://example.test',
   /** Refuse every request the popup makes for itself, the way a browser that
    *  gates the loopback address space per document does. */
-  opts: { blockDirectFetch?: boolean } = {},
+  opts: { blockDirectFetch?: boolean; jobs?: unknown[] } = {},
 ) {
   const page = await browser.newPage()
   await page.setContent(PANEL_HTML.replace(/<script[\s\S]*?<\/script>/, ''))
   await page.addStyleTag({ content: PANEL_CSS })
   await page.evaluate(`
     window.__sent = []
+    window.__daemonCalls = []
     window.__blocked = ${opts.blockDirectFetch ? 'true' : 'false'}
     const answer = (path) => path.indexOf('/health') >= 0
       ? { ok: true }
-      : { ok: true, result: { port: 7717, jobs: [], browsers: [{ label: 'chrome' }],
+      : { ok: true, result: { port: 7717, jobs: ${JSON.stringify(opts.jobs ?? [])},
+                              browsers: [{ label: 'chrome' }],
                               workflows: ${JSON.stringify(workflows)} } }
     window.chrome = {
       runtime: {
@@ -738,7 +740,10 @@ async function popupWith(
         sendMessage: (msg) => {
           window.__sent.push(msg)
           // The worker's road is the one that still works.
-          if (msg.t === 'panel.daemon') return Promise.resolve({ ok: true, result: answer(msg.path).result })
+          if (msg.t === 'panel.daemon') {
+            window.__daemonCalls.push(msg.path)
+            return Promise.resolve({ ok: true, result: answer(msg.path).result })
+          }
           return Promise.resolve({ recording: null, state: {} })
         },
         onMessage: { addListener: () => {} },
@@ -748,8 +753,11 @@ async function popupWith(
     }
     window.close = () => { window.__closed = true }
     window.fetch = async (url) => {
+      const u = String(url)
+      const at = u.indexOf('/api/')
+      if (at >= 0) window.__daemonCalls.push(u.slice(at))
       if (window.__blocked) throw new TypeError('Failed to fetch')
-      return { ok: true, json: async () => answer(String(url)) }
+      return { ok: true, json: async () => answer(u) }
     }
   `)
   await page.evaluate(PANEL_JS)
@@ -1319,9 +1327,9 @@ test('a refusal from the daemon is an answer, not a reason to ask again elsewher
     window.fetch = async () => ({ ok: true, json: async () => ({ ok: false, error: 'it is disabled' }) })
   `)
   await page.evaluate(`[...document.querySelectorAll('#here button')].find(b => b.textContent === 'Test run').click()`)
-  await page.waitForFunction(`!document.getElementById('modal').hidden`)
+  await page.waitForFunction(`!document.getElementById('said').hidden`)
   assert.match(
-    (await page.evaluate(`document.getElementById('modal-body').textContent`)) as string,
+    (await page.evaluate(`document.getElementById('said').textContent`)) as string,
     /it is disabled/,
   )
   assert.equal(
@@ -1332,12 +1340,275 @@ test('a refusal from the daemon is an answer, not a reason to ask again elsewher
   await page.close()
 })
 
-test('the manifest asks for the permission that makes the direct road work', skip, async () => {
+test('the manifest asks for nothing the browser does not have', skip, async () => {
+  // A permission Chrome does not recognise is not ignored quietly: it puts a
+  // warning on the extensions page for as long as the extension is installed,
+  // and buys nothing. `localNetworkAccess` was added here on the strength of
+  // the string appearing in Chrome's binary, which turned out to be a policy
+  // and a feature flag rather than anything an extension may ask for.
+  const known = new Set([
+    'storage', 'tabs', 'scripting', 'notifications', 'alarms',
+    'activeTab', 'downloads', 'clipboardWrite', 'unlimitedStorage', 'offscreen',
+  ])
   const manifest = JSON.parse(
     readFileSync(join(HERE, '..', '..', 'extension', 'manifest.json'), 'utf-8'),
   )
-  assert.ok(
-    manifest.permissions.includes('localNetworkAccess'),
-    'without it a modern browser refuses every request this popup makes',
+  for (const p of manifest.permissions) {
+    assert.ok(known.has(p), `"${p}" is not a permission this project has checked exists`)
+  }
+})
+
+/* --------------------------------------------- clicks the popup used to eat */
+
+/**
+ * The popup rebuilt its lists under the cursor, and a click cannot survive that.
+ *
+ * A click is a mousedown and a mouseup on the same element. Destroy that element
+ * in between and the browser fires `click` on the nearest common ancestor
+ * instead — so a handler attached to the button never runs, no error is raised,
+ * and nothing at all happens.
+ *
+ * `render()` ran on a 2-second poll, on every state push, and — the reliable
+ * one — on `window.focus`, which fires when you click into a popup that did not
+ * have focus. Every dynamically drawn button was therefore being swapped out
+ * underneath the very click meant for it. Record and Retry always worked,
+ * because they are written in the HTML and never replaced; Resume, Cancel,
+ * Activate and Test run are drawn by render() and never did.
+ */
+
+/** Press a button the way a hand does, with the list rebuilding in between. */
+async function clickThrough(page: any, label: string, disturb: () => Promise<void>) {
+  const at = (await page.evaluate(`(() => {
+    const b = [...document.querySelectorAll('#here button, #blocked button')]
+      .find(x => x.textContent === ${JSON.stringify(label)})
+    if (!b) return null
+    const r = b.getBoundingClientRect()
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+  })()`)) as { x: number; y: number } | null
+  assert.ok(at, `no "${label}" button to press`)
+  await page.mouse.move(at!.x, at!.y)
+  await page.mouse.down()
+  await disturb()
+  await page.mouse.up()
+}
+
+test('a click lands even though the popup was re-rendering as it happened', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  await page.evaluate(`window.__sent.length = 0`)
+
+  await clickThrough(page, 'Test run', async () => {
+    // The exact trigger: clicking into a popup that did not have focus.
+    await page.evaluate(`window.dispatchEvent(new Event('focus'))`)
+    await new Promise((r) => setTimeout(r, 120))
+  })
+
+  await page.waitForFunction(
+    `window.__daemonCalls.some(c => c === '/api/workflows.test')`,
+    { timeout: 4000 },
   )
+  await page.close()
+})
+
+test('and still lands across a poll, which rebuilds on its own schedule', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  await page.evaluate(`window.__daemonCalls.length = 0`)
+  await clickThrough(page, 'Test run', () => new Promise((r) => setTimeout(r, 2400)))
+  await page.waitForFunction(
+    `window.__daemonCalls.some(c => c === '/api/workflows.test')`,
+    { timeout: 4000 },
+  )
+  await page.close()
+})
+
+test('nothing is redrawn while nothing has changed', skip, async () => {
+  // The fix at its root: a list that is only rebuilt when it would look
+  // different cannot swap a button out from under a click in the first place.
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  const first = await page.evaluate(`document.querySelector('#here .wf')`)
+  await page.evaluate(`window.__node = document.querySelector('#here .wf')`)
+  await page.evaluate(`window.dispatchEvent(new Event('focus'))`)
+  await new Promise((r) => setTimeout(r, 2500))
+  assert.equal(
+    await page.evaluate(`window.__node === document.querySelector('#here .wf')`),
+    true,
+    'the very same element, not an identical replacement',
+  )
+  assert.ok(first !== undefined)
+  await page.close()
+})
+
+test('a blocked job can be resumed and cancelled', skip, async () => {
+  // The two that had no error handling at all, so a failure was silent and a
+  // success that left the job blocked looked identical to it.
+  const page = await popupWith([], 'https://example.test', {
+    jobs: [
+      {
+        id: 'j1',
+        workflowName: 'generate-image',
+        status: 'blocked',
+        stepIndex: 2,
+        stepCount: 5,
+        blockedReason: 'Sign in first',
+        isTest: false,
+      },
+    ],
+  })
+  await page.waitForFunction(`document.querySelectorAll('#blocked .card').length === 1`)
+  await page.evaluate(`window.__daemonCalls.length = 0`)
+
+  await page.evaluate(`[...document.querySelectorAll('#blocked button')].find(b => b.textContent === 'Resume').click()`)
+  await page.waitForFunction(`window.__daemonCalls.includes('/api/jobs.resume')`)
+  // And it says so, because resuming into the same obstacle parks the job
+  // again, which on screen is indistinguishable from nothing happening.
+  await page.waitForFunction(`!document.getElementById('said').hidden`)
+  assert.match(
+    (await page.evaluate(`document.getElementById('said').textContent`)) as string,
+    /resumed/i,
+  )
+
+  await page.evaluate(`[...document.querySelectorAll('#blocked button')].find(b => b.textContent === 'Cancel').click()`)
+  await page.waitForFunction(`window.__daemonCalls.includes('/api/jobs.cancel')`)
+  await page.close()
+})
+
+test('a failed action says why, rather than going quiet', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  await page.evaluate(`
+    window.fetch = async () => ({ ok: true, json: async () => ({ ok: false, error: 'no browser attached' }) })
+  `)
+  await page.evaluate(`[...document.querySelectorAll('#here button')].find(b => b.textContent === 'Test run').click()`)
+  await page.waitForFunction(`!document.getElementById('said').hidden`)
+  const shown = (await page.evaluate(`document.getElementById('said').textContent`)) as string
+  assert.match(shown, /no browser attached/)
+  assert.equal(await page.evaluate(`document.getElementById('said').className`), 'said bad')
+  await page.close()
+})
+
+test('a click lands even when the state genuinely changed mid-press', skip, async () => {
+  // The signature check covers a redraw that would have changed nothing. This
+  // is the other half: a running job advancing a step is entitled to redraw,
+  // and must still not do it in the middle of somebody pressing a button.
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  await page.evaluate(`window.__daemonCalls.length = 0`)
+
+  await clickThrough(page, 'Test run', async () => {
+    await page.evaluate(`(() => {
+      const moved = { ok: true, result: { port: 7717,
+        jobs: [{ id: 'j9', workflowName: 'generate-image', status: 'running',
+                 stepIndex: 3, stepCount: 5, blockedReason: null, isTest: true }],
+        browsers: [{ label: 'chrome' }],
+        workflows: [{ name: 'generate-image', status: 'active', produces: 'image', steps: 4,
+                      origins: ['https://example.test'], inputs: [], health: { state: 'ok' } }] } }
+      window.fetch = async (url) => {
+        const u = String(url); const at = u.indexOf('/api/')
+        if (at >= 0) window.__daemonCalls.push(u.slice(at))
+        return { ok: true, json: async () => u.indexOf('/health') >= 0 ? { ok: true } : moved }
+      }
+    })()`)
+    await new Promise((r) => setTimeout(r, 2400))
+  })
+
+  await page.waitForFunction(`window.__daemonCalls.some(c => c === '/api/workflows.test')`, {
+    timeout: 4000,
+  })
+  // And the change it was holding is drawn once the click is through.
+  await page.waitForFunction(`document.querySelectorAll('#running .card').length === 1`, {
+    timeout: 4000,
+  })
+  await page.close()
+})
+
+/* ------------------------------------------------ naming what you point at */
+
+/**
+ * A name is what a thing is called, not everything written inside it.
+ *
+ * `textContent` concatenates every descendant with no regard for layout, so a
+ * list row holding a title and a description in separate blocks came back as
+ * one run-on string and was chopped mid-word at the length cap — this is a real
+ * one, from a workflow in the wild:
+ *
+ *   Click NewscasterProfessional, authoritative, clear articulation with broadcas
+ *
+ * That was the step's name *and* the selector built from it.
+ */
+
+test('a row is named by its first line, not by everything inside it', skip, async () => {
+  const page = await pageWith(`
+    <div id="row" role="button">
+      <div>Newscaster</div>
+      <div>Professional, authoritative, clear articulation with standard broadcast delivery</div>
+    </div>`)
+  // Dispatched on the row itself: clicking its middle lands on the description
+  // inside it, and naming *that* by its own first line is correct — a step is
+  // about the thing you pointed at.
+  await page.click('#atelier-root [data-act="pick"]')
+  await page.evaluate(`document.getElementById('row').click()`)
+  await page.waitForSelector('#atelier-root .at-card')
+  assert.equal(
+    await page.evaluate(`document.querySelector('#atelier-root .at-card .at-input').value`),
+    'Newscaster',
+  )
+  await page.close()
+})
+
+test('and pointing at the description inside it names that, by its own first line', skip, async () => {
+  const page = await pageWith(`
+    <div id="row" role="button">
+      <div>Newscaster</div>
+      <div id="desc">Professional, authoritative, clear articulation with standard broadcast delivery</div>
+    </div>`)
+  await page.click('#atelier-root [data-act="pick"]')
+  await page.evaluate(`document.getElementById('desc').click()`)
+  await page.waitForSelector('#atelier-root .at-card')
+  const name = (await page.evaluate(
+    `document.querySelector('#atelier-root .at-card .at-input').value`,
+  )) as string
+  assert.ok(name.startsWith('Professional, authoritative'), name)
+  assert.ok(name.length <= 61, 'still a name rather than a paragraph')
+  await page.close()
+})
+
+test('a long name is cut at a word, and says it was cut', skip, async () => {
+  const page = await pageWith(
+    `<button id="go">Generate an illustration of a rope bridge with its middle planks missing</button>`,
+  )
+  await pointAt(page, '#go')
+  const name = (await page.evaluate(
+    `document.querySelector('#atelier-root .at-card .at-input').value`,
+  )) as string
+  assert.ok(name.length <= 61, 'kept to a name rather than a paragraph: ' + name)
+  assert.ok(name.endsWith('…'), 'and says so')
+  assert.ok(!/\s\S{1,3}…$/.test(name), 'cut at a word, not mid-word: ' + name)
+  await page.close()
+})
+
+test('a short label is left exactly as it reads', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate image</button>`)
+  await pointAt(page, '#go')
+  assert.equal(
+    await page.evaluate(`document.querySelector('#atelier-root .at-card .at-input').value`),
+    'Generate image',
+  )
+  await page.close()
+})
+
+test('the name a row is given still finds the row when it can', skip, async () => {
+  // The first line belongs to a child, so a text selector for it would resolve
+  // to that child rather than the row — which is why a name that does not
+  // resolve to the element picked is kept as a name and nothing more.
+  const page = await pageWith(`
+    <div id="row" role="button" data-testid="voice-newscaster">
+      <div>Newscaster</div><div>A long description of the voice</div>
+    </div>`)
+  await page.click('#atelier-root [data-act="pick"]')
+  await page.evaluate(`document.getElementById('row').click()`)
+  await page.waitForSelector('#atelier-root .at-card')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+  const step = (await page.evaluate(`window.__steps()[0]`)) as any
+  assert.equal(step.target, 'Newscaster')
+  assert.equal(step.identifier, null, 'not kept as a selector, because it resolves elsewhere')
+  assert.ok(step.selectors.some((s: any) => s.strategy === 'testid'), 'the row is still findable')
+  await page.close()
 })

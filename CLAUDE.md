@@ -131,6 +131,37 @@ you reach for while standing on a site. A list you scan past to find the two
 entries that apply costs more than it gives, and everything else is one click
 away on the dashboard.
 
+**Never rebuild a list that has a button in it unless it would look different.**
+A click is a mousedown and a mouseup on the *same* element; destroy it in
+between and the browser fires `click` on the nearest common ancestor, so the
+handler never runs — silently, with nothing to see. The popup re-rendered on a
+poll, on every state push, and on `window.focus`, which fires the moment you
+click into a popup that did not have focus, so **every** dynamically drawn
+button was swapped out from under the click meant for it. Record and Retry
+always worked because they are written in the HTML. `render()` compares a
+signature and returns early, holds any frame that arrives while a pointer is
+down, and there is no focus listener.
+
+**Every popup action reports what happened.** Resume and Cancel had
+`try { … } finally { refresh() }` and no `catch`, so a failure was silent and a
+success that left the job blocked was indistinguishable from one. `act()` runs
+them all and puts the outcome — the real error, or what it did — in `#said`.
+
+**Do not add a permission without checking the browser has it.** A permission
+Chrome does not recognise is not ignored quietly: it puts a warning on the
+extensions page for as long as the extension is installed, and buys nothing.
+`localNetworkAccess` was added on the strength of the string appearing in
+Chrome's binary; it is a policy and a feature flag, not something an extension
+may ask for. A test now holds the permission list to names that have been
+checked.
+
+**A name is what a thing is called, not everything inside it.** `textContent`
+concatenates every descendant regardless of layout, so a list row with a title
+and a description came back as one run-on string, chopped mid-word at the
+length cap, and was used as the step's name *and* as a selector.
+`readableName()` takes the first line of `innerText` — a block boundary is a
+newline — and cuts at a word.
+
 **The panel reads from the daemon directly, and through the worker only when it
 cannot.** `panel.js` fetches `/api/overview` over HTTP itself, because routing
 panel state through the worker meant a sleeping or wedged worker made the popup
@@ -354,6 +385,20 @@ to the whole tab, cannot be styled, block the event loop the live stream runs
 on, and read as though the *site* is asking at the exact moment the question is
 about Atelier. Both the panel and the dashboard have their own, and a test
 greps for the banned ones.
+
+**An asset is whatever a workflow captured, and that was never only pictures.**
+`kindOf()` decides from the mime, which has always travelled with the asset, and
+the grid and the viewer both branch on it: an image, a video that plays, audio
+with a transport, a PDF in a frame, text fetched and set as text. Everything
+else gets its symbol and its type rather than a blank square, because a grid of
+identical blank squares is the same as no grid.
+
+**The asset viewer's stage says which asset it is showing.** `dataset.showing`
+is what decides whether to rebuild, rather than a variable kept alongside —
+those drift from the close handler that resets them, and did: the stage came up
+empty for everything opened after the first. Closing pauses whatever was
+playing and changes nothing else, because the close event is dispatched as a
+task and emptying the stage there races with the next open.
 
 **`http/dashboard.ts` is one big template literal, so no backticks inside it.**
 A backtick in a comment closes the string and the build reports a syntax error

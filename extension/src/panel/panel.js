@@ -36,6 +36,7 @@ const els = {
   modalBody: $('modal-body'),
   modalGo: $('modal-go'),
   modalStop: $('modal-stop'),
+  said: $('said'),
 }
 
 let recording = null
@@ -80,6 +81,48 @@ function tell(title, body) {
   }
 }
 
+/* --------------------------------------------------------------- doing */
+
+let saidTimer = null
+
+/**
+ * What just happened.
+ *
+ * Every button in here used to do its work behind a `finally { refresh() }` and
+ * report nothing at all — so a request that failed, for any reason, was
+ * indistinguishable from a button that was not wired up. "Nothing happens" was
+ * the *only* thing the popup could say, and it said it whether the daemon had
+ * refused, the browser had, or the job had simply gone back to being blocked.
+ */
+function said(message, bad = false) {
+  clearTimeout(saidTimer)
+  els.said.textContent = message
+  els.said.className = bad ? 'said bad' : 'said'
+  els.said.hidden = false
+  // A failure stays until something else happens; a success gets out of the way.
+  if (!bad) saidTimer = setTimeout(() => { els.said.hidden = true }, 4000)
+}
+
+/**
+ * Run one action, and account for it.
+ *
+ * `done` is the words for the success case, because "it worked" is worth saying
+ * when the visible result of resuming a job is often that it goes straight back
+ * to being blocked — which looks exactly like nothing.
+ */
+async function act(button, done, path, body) {
+  button.disabled = true
+  try {
+    await daemon(path, body)
+    said(done)
+  } catch (e) {
+    said(e.message, true)
+  } finally {
+    button.disabled = false
+    await refresh()
+  }
+}
+
 /* --------------------------------------------------------------- render */
 
 function jobCard(job, { alert = false } = {}) {
@@ -105,27 +148,19 @@ function jobCard(job, { alert = false } = {}) {
     const resume = document.createElement('button')
     resume.className = 'primary'
     resume.textContent = 'Resume'
-    // Retries the step it stopped on, so "I fixed it" is the whole interaction.
-    resume.onclick = async () => {
-      resume.disabled = true
-      try {
-        await daemon('/api/jobs.resume', { id: job.id })
-      } finally {
-        await refresh()
-      }
-    }
+    // Retries the step it stopped on, so "I fixed it" is the whole interaction —
+    // and says so, because a job that resumes into the same obstacle parks
+    // again, which on screen is indistinguishable from a button doing nothing.
+    resume.onclick = () =>
+      act(resume, `Resumed ${job.workflowName} at step ${job.stepIndex + 1}.`, '/api/jobs.resume', {
+        id: job.id,
+      })
 
     const cancel = document.createElement('button')
     cancel.className = 'ghost'
     cancel.textContent = 'Cancel'
-    cancel.onclick = async () => {
-      cancel.disabled = true
-      try {
-        await daemon('/api/jobs.cancel', { id: job.id })
-      } finally {
-        await refresh()
-      }
-    }
+    cancel.onclick = () =>
+      act(cancel, `Cancelled ${job.workflowName}.`, '/api/jobs.cancel', { id: job.id })
 
     actions.append(resume, cancel)
     li.append(actions)
@@ -174,16 +209,8 @@ function workflowRow(w) {
     const go = document.createElement('button')
     go.className = 'primary'
     go.textContent = 'Activate'
-    go.onclick = async () => {
-      go.disabled = true
-      try {
-        await daemon('/api/workflows.activate', { name: w.name })
-      } catch (e) {
-        tell('Could not activate', e.message)
-      } finally {
-        await refresh()
-      }
-    }
+    go.onclick = () => act(go, `"${w.name}" is active — your agent can call it now.`,
+      '/api/workflows.activate', { name: w.name })
     actions.append(go)
   }
 
@@ -192,16 +219,8 @@ function workflowRow(w) {
     test.className = 'ghost'
     test.textContent = 'Test run'
     test.title = 'Run it with the values it was recorded with'
-    test.onclick = async () => {
-      test.disabled = true
-      try {
-        await daemon('/api/workflows.test', { name: w.name })
-      } catch (e) {
-        tell('Could not start the test', e.message)
-      } finally {
-        await refresh()
-      }
-    }
+    test.onclick = () => act(test, `Test run of "${w.name}" started — watch it above.`,
+      '/api/workflows.test', { name: w.name })
     actions.append(test)
   }
 
@@ -271,10 +290,70 @@ function chipFor(w) {
   return null
 }
 
+/**
+ * What the last render drew, so an identical one can be skipped.
+ *
+ * This is the whole of the "buttons do nothing" bug. A click is a mousedown and
+ * a mouseup on the *same* element; destroy that element in between and the
+ * browser fires `click` on the nearest common ancestor instead, so a handler on
+ * the button never runs — silently, with no error to see. render() ran on a
+ * 2-second poll, on every state push, and on window focus, which fires the
+ * moment you click into a popup that did not have focus. Every button it draws
+ * was being swapped out from under the click meant for it. Record and Retry
+ * always worked because they are written in the HTML and never replaced.
+ *
+ * So: only touch the DOM when it would look different.
+ */
+let drawn = null
+
+/**
+ * And never rebuild while a button is being pressed.
+ *
+ * The signature above stops the *needless* redraws, which is the common case.
+ * This covers the rest: a state that genuinely changed — a running job
+ * advancing a step — would otherwise still be entitled to redraw in the middle
+ * of a press, and lose that click the same way. So a frame that arrives during
+ * one is held, and drawn once the click has been dispatched.
+ */
+let pressing = false
+let held = null
+
+document.addEventListener('pointerdown', () => {
+  pressing = true
+})
+
+document.addEventListener('pointerup', () => {
+  pressing = false
+  // After the click, not before. pointerup, mouseup and click are one sequence,
+  // so redrawing anywhere inside it costs the click regardless.
+  setTimeout(() => {
+    const next = held
+    held = null
+    if (next) render(...next)
+  }, 0)
+})
+
 function render(state, daemonUp, browsers = []) {
+  if (pressing) {
+    held = [state, daemonUp, browsers]
+    return
+  }
   // Two different failures, two different fixes. Conflating them is what made
   // the old banner give the wrong instruction most of the time.
   const attached = browsers.length > 0
+
+  const signature = JSON.stringify([
+    daemonUp,
+    attached,
+    here,
+    (state.jobs ?? []).map((j) => [j.id, j.status, j.stepIndex, j.stepCount, j.blockedReason, j.isTest]),
+    (state.workflows ?? []).map((w) => [
+      w.name, w.status, w.steps, w.produces, w.origins,
+      w.health?.state, (w.health?.degraded ?? []).map((d) => d.stepId),
+    ]),
+  ])
+  if (signature === drawn) return
+  drawn = signature
   els.offline.hidden = daemonUp && attached
   if (!daemonUp) {
     els.offlineWhy.textContent = 'No daemon on 127.0.0.1. Start it, and this will reconnect.'
@@ -410,14 +489,11 @@ function openDashboard(hash) {
  * anywhere. The worker is needed to *drive* a browser; it is not needed to
  * *describe* one.
  *
- * The fallback is not defensiveness. Chrome now gates requests to the loopback
- * address space behind Local Network Access, and it gates them per *document*:
- * every fetch from this page was refused — "Permission was denied for this
- * request to access the `loopback` address space" — while the service worker's
- * went through untouched, which is why recording kept working and every button
- * in here quietly did nothing. The manifest asks for `localNetworkAccess`,
- * which is the proper fix; this is what makes the popup work on a browser that
- * refuses anyway, and it costs one message hop on a path that was already
+ * The fallback exists because the worker has one thing this page does not: a
+ * connection it is already holding. Where a document's request to loopback is
+ * refused — by a browser policy, an enterprise rule, an extension that filters
+ * requests — the worker's is usually not, so the popup has somewhere to go
+ * rather than going quiet. It costs one message hop on a path that was already
  * failing.
  *
  * Only a *transport* failure falls back. An error the daemon itself returned is
@@ -527,11 +603,16 @@ function startPolling() {
  * the first paint — but Chrome throttles timers hard in any document that is not
  * visible, and this is what stopped the popup looking frozen on changes made
  * while it was in the background.
+ *
+ * There was a `focus` listener here too, and it was the reliable half of the
+ * lost-click bug: clicking into a popup that does not have focus fires `focus`
+ * first, so every first click refreshed the list and then landed on a button
+ * that no longer existed. It said nothing the poll does not already say two
+ * seconds later.
  */
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') refresh()
 })
-window.addEventListener('focus', () => refresh())
 
 // Keep listening for worker pushes — they arrive sooner than the next poll —
 // but never depend on them.

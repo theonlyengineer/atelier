@@ -298,10 +298,23 @@ export const routes: Record<string, Handler> = {
     return { asset }
   },
 
+  /**
+   * Delete one asset or a selection of them.
+   *
+   * Takes `ids` as well as `id` because clearing out a batch is one decision a
+   * person makes once, and sending it as twenty requests would be twenty state
+   * pushes and twenty chances to half-finish. Missing ids are reported rather
+   * than thrown on: a selection where one row has already gone should still
+   * remove the other nineteen.
+   */
   '/api/assets.delete': (b) => {
-    const id = b?.id ?? missing('id')
-    if (!assets.remove(id)) throw new Error(`no asset ${id}`)
-    return { deleted: id }
+    const ids: string[] = Array.isArray(b?.ids) ? b.ids : [b?.id ?? missing('id')]
+    if (!ids.length) throw new Error('no assets named')
+    const deleted: string[] = []
+    const missed: string[] = []
+    for (const id of ids) (assets.remove(id) ? deleted : missed).push(id)
+    if (!deleted.length) throw new Error(`no asset ${missed.join(', ')}`)
+    return { deleted, missing: missed }
   },
 
   '/api/assets.attach': (b) => {

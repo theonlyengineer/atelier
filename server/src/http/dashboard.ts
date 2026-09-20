@@ -421,10 +421,30 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 
   /* --------------------------------------------------------- assets --- */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(146px,1fr));gap:13px}
+  .tile{position:relative}
   .asset{all:unset;cursor:zoom-in;border-radius:var(--r-sm);overflow:hidden;background:var(--panel);
-    border:1px solid var(--line);display:flex;flex-direction:column}
+    border:1px solid var(--line);display:flex;flex-direction:column;width:100%;box-sizing:border-box}
   .asset:hover{border-color:var(--accent)}
   .asset .thumb{aspect-ratio:4/3;background:var(--sunk);display:block;width:100%;object-fit:cover}
+  /*
+   * What a thing is, for everything that is not a picture. A grid of identical
+   * blank squares is the same as no grid: audio, a PDF and a text file have to
+   * be told apart before they can be chosen between, and none of them has a
+   * thumbnail to do it with.
+   */
+  .thumb.glyph{display:grid;place-items:center;gap:6px;color:var(--faint);aspect-ratio:4/3}
+  .thumb.glyph svg{width:30px;height:30px;stroke:currentColor;fill:none;stroke-width:1.5;
+    stroke-linecap:round;stroke-linejoin:round}
+  .thumb.glyph span{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+  .tile .pick{position:absolute;top:8px;left:8px;z-index:2;width:20px;height:20px;cursor:pointer;
+    accent-color:var(--accent);margin:0}
+  .tile.on .asset{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+
+  /* The bar that only exists while something is selected. */
+  .bulk{display:flex;align-items:center;gap:10px;margin-bottom:13px;padding:10px 14px;
+    border-radius:var(--r);background:var(--sunk);border:1px solid var(--line);font-size:13px}
+  .bulk b{font-variant-numeric:tabular-nums}
+  .bulk .spacer{margin-left:auto}
   .asset .cap{padding:9px 11px 11px;display:flex;flex-direction:column;gap:3px}
   .asset .cap b{font-size:12px;font-weight:550;line-height:1.4;color:var(--ink);
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -460,15 +480,26 @@ export const dashboardHtml = (version: string) => `<!doctype html>
    * image renders at full height inside a short box. object-fit:contain on a
    * definitely-sized element has no such circularity.
    */
-  .viewer .stage img{position:absolute;inset:18px;width:calc(100% - 36px);
-    height:calc(100% - 36px);object-fit:contain;border-radius:8px}
+  .viewer .stage img,.viewer .stage video,.viewer .stage iframe{position:absolute;inset:18px;
+    width:calc(100% - 36px);height:calc(100% - 36px);object-fit:contain;border-radius:8px;border:0}
+  /* Audio has no picture, so it gets the middle of the stage rather than being
+     stretched across it, and a line saying what it is. */
+  .viewer .stage .middle{position:absolute;inset:18px;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;color:var(--faint);text-align:center}
+  .viewer .stage .middle audio{width:min(100%,420px)}
+  .viewer .stage .middle svg{width:44px;height:44px;stroke:currentColor;fill:none;stroke-width:1.4;
+    stroke-linecap:round;stroke-linejoin:round}
+  .viewer .stage pre{position:absolute;inset:18px;margin:0;overflow:auto;padding:14px 16px;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);
+    font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--dim)}
   .viewer .meta{padding:20px;display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
   /* Stacked, the whole panel scrolls as one rather than two nested scrollers. */
   @media (max-width:760px){
     .viewer{grid-template-columns:1fr;grid-template-rows:auto auto;max-height:92vh;overflow:auto}
     .viewer .stage{min-height:180px;display:grid;place-items:center}
-    .viewer .stage img{position:static;inset:auto;width:auto;height:auto;
-      max-width:100%;max-height:46vh}
+    .viewer .stage img,.viewer .stage video,.viewer .stage iframe{position:static;inset:auto;
+      width:auto;height:auto;max-width:100%;max-height:46vh}
+    .viewer .stage .middle,.viewer .stage pre{position:static;inset:auto;max-height:46vh}
     .viewer .meta{overflow:visible}
   }
   .viewer h3{margin:0;font-size:15px}
@@ -650,6 +681,15 @@ export const dashboardHtml = (version: string) => `<!doctype html>
       </div>
 
       <div role="tabpanel" id="panel-assets" aria-labelledby="tab-assets" hidden>
+        <!-- Only on screen while something is selected. A toolbar that is always
+             there, mostly disabled, is a toolbar people stop reading. -->
+        <div class="bulk" id="bulk" hidden>
+          <b id="bulk-count">0 selected</b>
+          <span class="spacer"></span>
+          <button class="btn" id="bulk-all">Select all</button>
+          <button class="btn" id="bulk-none">Clear</button>
+          <button class="btn danger" id="bulk-delete">Delete selected</button>
+        </div>
         <div class="grid" id="assets"></div>
         <div id="assets-empty"></div>
       </div>
@@ -697,7 +737,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 
 <dialog id="viewer">
   <div class="viewer">
-    <div class="stage"><img id="v-img" alt=""></div>
+    <div class="stage" id="v-stage"></div>
     <div class="meta">
       <h3 id="v-title">Asset</h3>
       <div class="field">
@@ -999,17 +1039,60 @@ function workflowCard(w) {
     note + '</article>'
 }
 
+/*
+ * What an asset *is*, decided once and used everywhere.
+ *
+ * Only images were ever given a shape here; everything else got a blank square,
+ * which is the same as no grid at all — audio, a PDF and a text file cannot be
+ * chosen between until they can be told apart. The mime has always travelled
+ * with the asset, so nothing new had to be stored to know this.
+ */
+const ICONS = {
+  audio: '<svg viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/></svg>',
+  video: '<svg viewBox="0 0 24 24"><rect x="2.5" y="5" width="14" height="14" rx="3"/><path d="m16.5 10 5-3v10l-5-3z"/></svg>',
+  pdf:   '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>',
+  text:  '<svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>',
+  file:  '<svg viewBox="0 0 24 24"><path d="M20.5 13.5 12 22a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8"/></svg>',
+}
+
+function kindOf(mime) {
+  const m = String(mime || '')
+  if (m.indexOf('image/') === 0) return 'image'
+  if (m.indexOf('audio/') === 0) return 'audio'
+  if (m.indexOf('video/') === 0) return 'video'
+  if (m === 'application/pdf') return 'pdf'
+  if (m.indexOf('text/') === 0 || m === 'application/json') return 'text'
+  return 'file'
+}
+
+/** The short word under the icon: "mp3", "pdf", "json" — what a person would
+ *  call it, taken from the mime rather than from a filename we do not have. */
+function label(mime) {
+  const tail = String(mime || '').split('/')[1] || 'file'
+  return tail.replace(/^x-/, '').replace(/[+;].*$/, '').slice(0, 8)
+}
+
+function thumbFor(a) {
+  const kind = kindOf(a.mime)
+  if (kind === 'image') return '<img class="thumb" loading="lazy" src="/asset/' + a.id + '" alt="">'
+  // A video really can show itself; everything else gets its symbol and its type.
+  if (kind === 'video') return '<video class="thumb" muted preload="metadata" src="/asset/' + a.id + '"></video>'
+  return '<span class="thumb glyph">' + (ICONS[kind] || ICONS.file) +
+    '<span>' + esc(label(a.mime)) + '</span></span>'
+}
+
 function assetCard(a) {
   const what = a.description
     ? '<b>' + esc(a.description) + '</b>'
     : '<b class="none">No description yet</b>'
-  return '<button class="asset" data-asset="' + esc(a.id) + '">' +
-    (a.mime.indexOf('image/') === 0
-      ? '<img class="thumb" loading="lazy" src="/asset/' + a.id + '" alt="">'
-      : '<span class="thumb"></span>') +
+  const on = picked.has(a.id)
+  return '<div class="tile' + (on ? ' on' : '') + '">' +
+    '<input class="pick" type="checkbox" data-pick="' + esc(a.id) + '"' + (on ? ' checked' : '') +
+    ' aria-label="Select this asset">' +
+    '<button class="asset" data-asset="' + esc(a.id) + '">' + thumbFor(a) +
     '<span class="cap">' + what +
     '<span>' + (a.width ? a.width + '×' + a.height : kb(a.bytes)) + ' · ' + ago(a.createdAt) + '</span>' +
-    '</span></button>'
+    '</span></button></div>'
 }
 
 /* ------------------------------------------------------ one workflow --- */
@@ -1274,7 +1357,12 @@ function render(d) {
     : '<div style="color:var(--faint);font-size:13px">Nothing has run yet.</div>'
 
   /* -- assets ------------------------------------------------------------ */
+  // A selection cannot outlive the things in it — an asset deleted from
+  // somewhere else must not stay ticked and come back on the next Delete.
+  const alive = new Set(d.assets.map((a) => a.id))
+  for (const id of [...picked]) if (!alive.has(id)) picked.delete(id)
   $('assets').innerHTML = d.assets.map(assetCard).join('')
+  renderBulk()
   $('assets-empty').innerHTML = d.assets.length ? ''
     : '<div class="empty"><b>Nothing produced yet</b>Assets a workflow captures land here, with the prompt that made them.</div>'
 
@@ -1345,13 +1433,97 @@ function kpi(tone, icon, title, chip, big, sub, goto) {
     '<button class="go" data-goto="' + goto + '">See details →</button></div>'
 }
 
+/* ---------------------------------------------------------- selection --- */
+
+/* Which assets are ticked. By id rather than by position, for the same reason
+   the viewer is: the grid is rebuilt on every state frame, so an index captured
+   at render time can point at a different asset by the time it is used — and
+   one of these buttons deletes. */
+const picked = new Set()
+
+function renderBulk() {
+  const n = picked.size
+  $('bulk').hidden = n === 0
+  $('bulk-count').textContent = n + (n === 1 ? ' selected' : ' selected')
+}
+
+$('bulk-all').onclick = () => {
+  for (const a of (latest && latest.assets) || []) picked.add(a.id)
+  if (latest) render(latest)
+}
+$('bulk-none').onclick = () => { picked.clear(); if (latest) render(latest) }
+
+$('bulk-delete').onclick = () => {
+  const ids = [...picked]
+  if (!ids.length) return
+  ask({
+    title: 'Delete ' + plural(ids.length, 'asset') + '?',
+    body: 'The files are removed and cannot be recovered. The runs that produced them are kept.',
+    confirm: 'Delete them',
+    danger: true,
+    onConfirm: async () => {
+      try {
+        const res = await post('/api/assets.delete', { ids })
+        picked.clear()
+        if (res.missing && res.missing.length) {
+          tell('Some were already gone', plural(res.deleted.length, 'asset') + ' deleted; ' +
+            res.missing.length + ' had already been removed.')
+        }
+      } catch (e) { tell('Could not delete', e.message) }
+    },
+  })
+}
+
 /* ------------------------------------------------------------ viewer --- */
 
 let openAsset = null
 
+/*
+ * Show the asset, whatever it is.
+ *
+ * The stage held one <img> and nothing else, so an audio clip, a video, a PDF
+ * or a captured block of text all opened as a broken picture. Each kind gets
+ * the element that can actually play or render it, and text is fetched and set
+ * as text rather than framed — a text/plain iframe is a scrollbar around a
+ * paragraph.
+ */
+function stageFor(a) {
+  const url = '/asset/' + a.id
+  switch (kindOf(a.mime)) {
+    case 'image': return '<img id="v-img" src="' + url + '" alt="">'
+    case 'video': return '<video controls preload="metadata" src="' + url + '"></video>'
+    case 'audio': return '<div class="middle">' + ICONS.audio +
+      '<audio controls preload="metadata" src="' + url + '"></audio>' +
+      '<span>' + esc(a.mime) + ' · ' + kb(a.bytes) + '</span></div>'
+    case 'pdf':   return '<iframe title="PDF" src="' + url + '"></iframe>'
+    case 'text':  return '<pre id="v-text">Loading…</pre>'
+    default:      return '<div class="middle">' + ICONS.file +
+      '<span>' + esc(a.mime) + ' · ' + kb(a.bytes) + '</span>' +
+      '<button class="btn" data-download="' + esc(a.id) + '">Open it</button></div>'
+  }
+}
+
 function fillViewer(a) {
   openAsset = a.id
-  $('v-img').src = '/asset/' + a.id
+  /*
+   * The stage says which asset it is showing, and that is what decides whether
+   * to rebuild it — rather than any variable kept alongside. It has to be
+   * rebuilt rarely (redrawing on every state frame would restart a video
+   * halfway through watching it) and it has to be right, and a guard kept in a
+   * second place drifts from the close handler that resets it: it did, and the
+   * stage came up empty for everything opened after the first.
+   */
+  const stage = $('v-stage')
+  if (stage.dataset.showing !== a.id) {
+    stage.dataset.showing = a.id
+    stage.innerHTML = stageFor(a)
+    if (kindOf(a.mime) === 'text') {
+      fetch('/asset/' + a.id)
+        .then((r) => r.text())
+        .then((t) => { if (stage.dataset.showing === a.id && $('v-text')) $('v-text').textContent = t })
+        .catch(() => { if ($('v-text')) $('v-text').textContent = 'Could not read this one.' })
+    }
+  }
   $('v-title').textContent = a.workflowName ? a.workflowName : 'Asset'
   if (document.activeElement !== $('v-desc')) $('v-desc').value = a.description || ''
   $('v-prompt').textContent = a.prompt || 'No prompt recorded.'
@@ -1383,7 +1555,7 @@ $('v-delete').onclick = () => {
     danger: true,
     onConfirm: async () => {
       try {
-        await post('/api/assets.delete', { id: openAsset })
+        await post('/api/assets.delete', { ids: [openAsset] })
         $('viewer').close()
       } catch (e) { tell('Could not delete', e.message) }
     },
@@ -1405,7 +1577,19 @@ $('v-save').onclick = async () => {
 }
 // Clicking the backdrop closes, which is what everyone expects of a lightbox.
 $('viewer').addEventListener('click', (e) => { if (e.target === $('viewer')) $('viewer').close() })
-$('viewer').addEventListener('close', () => { openAsset = null })
+/*
+ * Closing stops whatever was playing, and changes nothing else.
+ *
+ * It used to empty the stage, which raced with opening the next asset: the
+ * close event is dispatched as a task, so a stage rebuilt for the new asset in
+ * the meantime was wiped by the close belonging to the old one, and the viewer
+ * came up blank. Pausing cannot race with anything, and the showing dataset
+ * attribute already makes the next open rebuild when it is a different asset.
+ */
+$('viewer').addEventListener('close', () => {
+  openAsset = null
+  for (const playing of $('v-stage').querySelectorAll('audio, video')) playing.pause()
+})
 
 /* ------------------------------------------------------------- theme --- */
 
@@ -1556,6 +1740,19 @@ document.addEventListener('click', async (e) => {
 
   const goto = e.target.closest('[data-goto]')
   if (goto) return goTab(goto.dataset.goto)
+
+  const pick = e.target.closest('[data-pick]')
+  if (pick) {
+    const id = pick.dataset.pick
+    if (pick.checked) picked.add(id)
+    else picked.delete(id)
+    pick.closest('.tile').classList.toggle('on', pick.checked)
+    renderBulk()
+    return
+  }
+
+  const download = e.target.closest('[data-download]')
+  if (download) return window.open('/asset/' + download.dataset.download, '_blank')
 
   const asset = e.target.closest('[data-asset]')
   if (asset && latest) {

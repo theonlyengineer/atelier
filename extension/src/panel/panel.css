@@ -251,6 +251,24 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
 
+/* The outcome of the last thing pressed. Loud enough to notice, gone by the
+   time you press the next one. */
+.said {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--fg);
+}
+
+.said.bad {
+  background: var(--alert-bg);
+  border-color: var(--alert);
+  color: var(--alert);
+}
+
 /* ------------------------------------------------------------ bits --- */
 
 .hint {
