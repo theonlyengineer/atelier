@@ -220,7 +220,12 @@ export class Runner {
         // result is saved as `draft` status: visible, editable, and unable to
         // run until a human activates it.
         try {
-          const proposed = proposeWorkflow({ name: msg.name, origins: msg.origins, raw: msg.raw })
+          const proposed = proposeWorkflow({
+            name: msg.name,
+            origins: msg.origins,
+            raw: msg.raw,
+            ...(msg.description ? { description: msg.description } : {}),
+          })
           const existing = repo.getWorkflowByName(proposed.name)
           const saved = repo.saveWorkflow({
             ...proposed,

@@ -328,6 +328,9 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .tag.bad{background:var(--bad-soft);color:var(--bad)} .tag.go{background:var(--accent-soft);color:var(--accent)}
   .wf-actions{margin-left:auto;display:flex;gap:7px;flex-wrap:wrap}
   .wf-desc{color:var(--dim);font-size:13px;margin:7px 0 0}
+  /* An absent description reads as absent. A generated sentence in the same
+     voice as a written one is how a library ends up looking documented. */
+  .wf-desc.none{color:var(--faint);font-style:italic}
   .wf-meta{color:var(--faint);font-size:11.5px;font-family:var(--mono);margin-top:10px;
     display:flex;gap:9px;flex-wrap:wrap;align-items:center}
   .wf-meta > * + *::before{content:"\\00B7";margin-right:9px;color:var(--line);font-weight:700}
@@ -738,6 +741,14 @@ const ago = (iso) => {
 }
 const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.round(n / 1024) + 'kB'
 
+/* What a workflow does, for when nobody has said what it is for. Composed here
+   rather than stored, so an undescribed workflow can be told apart from a
+   described one — which is the whole reason to ask. */
+const summarise = (w) =>
+  (w.produces === 'none' ? 'Runs' : 'Produces ' + w.produces) +
+  ((w.inputs || []).length ? ' from ' + w.inputs.map(i => i.name).join(', ') : '') +
+  ' by replaying ' + plural(w.steps, 'recorded step') + '.'
+
 /* --------------------------------------------------------------- ask --- */
 
 /**
@@ -980,7 +991,9 @@ function workflowCard(w) {
     '<span class="wf-actions">' +
     '<button class="btn" data-open="' + esc(w.name) + '">Open</button>' +
     '</span></div>' +
-    '<p class="wf-desc">' + esc(w.description) + '</p>' +
+    (w.description
+      ? '<p class="wf-desc">' + esc(w.description) + '</p>'
+      : '<p class="wf-desc none">' + esc(summarise(w)) + ' \u00B7 not described yet</p>') +
     '<div class="wf-meta"><span>' + plural(w.steps, 'step') + '</span>' +
     '<span>' + esc((w.origins || []).join(', ')) + '</span>' + runStrip(w.runs) + '</div>' +
     note + '</article>'
@@ -1025,6 +1038,8 @@ function actionWords(step) {
 
 /** Which step's value is open for editing, by id. */
 let editingStep = null
+/** Whether the description on the open workflow page is being edited. */
+let editingDesc = false
 
 function renderWorkflowPage() {
   const host = $('workflow-one')
@@ -1073,11 +1088,29 @@ function renderWorkflowPage() {
     '<span class="wf-name" style="cursor:default">' + esc(w.name) + '</span>' +
     '<span class="tag">' + esc(w.produces) + '</span>' + stateTagFor(w) +
     '<span class="wf-actions">' + actions + '</span></div>' +
-    '<p class="wf-desc">' + esc(w.description) + '</p>' +
     '<div class="wf-meta"><span>' + plural(w.steps, 'step') + '</span>' +
     '<span>' + esc((w.origins || []).join(', ')) + '</span>' + runStrip(w.runs) + '</div>' +
     (health.summary ? '<div class="note info">' + esc(health.summary) + '</div>' : '') +
     '</article>' +
+    // First, because it is the only thing on this page that says what the
+    // workflow is *for*. Everything below says what it does.
+    '<div class="card pad" style="margin-bottom:14px">' +
+    '<div class="sec-head"><h2>What it is for</h2></div>' +
+    (editingDesc
+      ? '<div class="field"><textarea id="wf-desc" placeholder="Generates one illustration from a full prompt">' +
+        esc(w.description) + '</textarea></div>' +
+        '<p class="hint">Your agent reads this to decide whether to call it, so say what it is good ' +
+        'for rather than what the steps do.</p>' +
+        '<div class="actions" style="display:flex;gap:8px;margin-top:12px">' +
+        '<button class="btn primary" data-save-desc="' + esc(w.name) + '">Save</button>' +
+        '<button class="btn" data-cancel-desc="1">Cancel</button></div>'
+      : (w.description
+          ? '<p class="wf-desc" style="margin:0">' + esc(w.description) + '</p>'
+          : '<p class="wf-desc none" style="margin:0">Nobody has said what this is for. Your agent ' +
+            'sees only the steps, so it has to guess whether to reach for it.</p>') +
+        '<button class="btn" style="margin-top:12px" data-edit-desc="1">' +
+        (w.description ? 'Change it' : 'Say what it is for') + '</button>') +
+    '</div>' +
     '<div class="card pad" style="margin-bottom:14px"><div class="sec-head"><h2>The agent passes</h2></div>' +
     inputs + '</div>' +
     '<div class="sec-head"><h2>Steps</h2></div>' +
@@ -1540,6 +1573,27 @@ document.addEventListener('click', async (e) => {
   const mode = e.target.closest('[data-mode]')
   if (mode) { editMode = mode.dataset.mode; return renderWorkflowPage() }
 
+  if (e.target.closest('[data-edit-desc]')) { editingDesc = true; return renderWorkflowPage() }
+  if (e.target.closest('[data-cancel-desc]')) { editingDesc = false; return renderWorkflowPage() }
+
+  const saveDesc = e.target.closest('[data-save-desc]')
+  if (saveDesc) {
+    try {
+      await post('/api/workflows.setDescription', {
+        name: saveDesc.dataset.saveDesc,
+        description: $('wf-desc') ? $('wf-desc').value : '',
+      })
+      editingDesc = false
+      /* Redrawn here rather than left to the live stream. The write pushes a
+         state frame, and that frame arrives *during* the await above — so the
+         page re-renders while the editor is still open, and then nothing ever
+         renders again to close it. The editor sat there looking unsaved over a
+         value that had been saved. */
+      renderWorkflowPage()
+    } catch (err) { tell('Could not save it', err.message) }
+    return
+  }
+
   const edit = e.target.closest('[data-edit]')
   if (edit) { editingStep = edit.dataset.edit; editMode = null; return renderWorkflowPage() }
 
@@ -1560,6 +1614,9 @@ document.addEventListener('click', async (e) => {
     try {
       await post('/api/workflows.setStepValue', body)
       editingStep = null; editMode = null
+      /* Same reason as the description above: the state frame this write causes
+         lands before these flags are cleared, so the close has to be drawn. */
+      renderWorkflowPage()
     } catch (err) { tell('Could not save the value', err.message) }
     return
   }

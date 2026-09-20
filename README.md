@@ -97,8 +97,17 @@ You are not recorded. You **state** each step, and Atelier performs it.
 4. **Add step.** Atelier performs it. The page moves on exactly as it would on a
    real run, and you point at the next thing.
 
-Repeat until you have captured the result. Then **Save workflow**, and activate
-it from the popup or the dashboard.
+Repeat until you have captured the result. Then **Save workflow** — which asks
+one last thing, **what it is for** — and activate it from the popup or the
+dashboard.
+
+**Why that question.** Everything else a workflow carries says what it *does*,
+and your agent reads all of it: the steps, the inputs, what it produces. None of
+it says whether this is the right thing to call. That one line is the only thing
+that does, and you are the only one who can write it. It is skippable, and an
+undescribed workflow says so rather than pretending — on its dashboard page, and
+to the agent, which is told to write one with `describe_workflow` once it works
+out what the thing is good for.
 
 **Why Atelier does the clicking.** Add step runs the step through the same
 executor that will replay it later. A step that cannot be performed is refused
@@ -171,8 +180,9 @@ success and assets as three figures, runs over the last fortnight, outcomes, and
 the top of each list. Then **Workflows**, **Runs**, **Assets** and **Connect**
 for the detail.
 
-**Every workflow has its own page**: every step with what it acts on, what it
-does and what it types, what each step is currently matching on, and the four
+**Every workflow has its own page**: what it is for — editable, because the
+answer usually gets better after a few runs — then every step with what it acts
+on, what it does and what it types, what each step is currently matching on, and the four
 things you can do to it — test it, activate it, disable it, delete it.
 Disabling keeps everything and makes it invisible to the agent, which is what
 you want when a site has changed and you have not fixed it yet. The Atelier
@@ -234,6 +244,7 @@ run_workflow  name, inputs     → replay it, wait, return the asset
 test_workflow name             → replay it with the values it was recorded with
 set_workflow_status name, s    → disable one without losing it, or enable it again
 set_step_value name, stepId    → move one value between "always this" and "the agent supplies it"
+describe_workflow name, text   → say what a workflow is for, once you know
 workflow_health [name]         → what each step is matching on now vs. as recorded
 repair_step   name, stepId     → fix where one step looks, without touching the rest
 list_jobs / job_status         → what ran, what is parked

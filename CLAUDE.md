@@ -101,6 +101,17 @@ both applied on the way through, and either would have written the secret into
 an asset. If you add an input type, decide explicitly which side of that line it
 is on.
 
+**A description is the only thing on a workflow that is neither recorded nor
+derived, and it is never invented.** The steps, the inputs and what it produces
+all say what a workflow *does*, and an agent reads every one of them; none of
+them says whether it is the right thing to call. So the panel asks at Save, the
+workflow's page lets it be written later, and `describe_workflow` lets an agent
+write down what it worked out. When there is none, `summarise()` composes a
+mechanical line **at display time** and says it is standing in — a generated
+sentence *stored* as the description is how a library ends up looking documented
+when nothing has been documented, and nothing can then report that a workflow
+has never been explained. Do not put one back in `propose.ts`.
+
 **A static value is never shown to the agent.** It is absent from the workflow's
 inputs and no tool reports it. That is the point of marking one, and it is what
 makes it safe to type an API key into a settings field while recording.
@@ -291,6 +302,14 @@ refactor that drops it removes the only signal that a workflow is dying.
 **Never build a selector from an element's current value.** It changes between
 runs, so the selector is wrong by construction — and on a password field it
 writes the secret into the workflow. See `docs/security.md`.
+
+**A dashboard control that writes must redraw, not wait for the stream.** The
+write pushes a state frame, and that frame arrives *during* the `await` — so the
+page re-renders while the editor is still open, and then nothing renders again
+to close it. The editor sat there looking unsaved over a value that had been
+saved. Both `setStepValue` and `setDescription` call `renderWorkflowPage()`
+after clearing their flag, and a test asserting only the database would not have
+caught it.
 
 **A confirm raised from inside a modal `<dialog>` must itself be a `<dialog>`.**
 `showModal()` puts the asset viewer in the top layer and makes everything else

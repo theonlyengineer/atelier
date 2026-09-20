@@ -1371,6 +1371,50 @@
 
   const dialogOpen = () => !$('at-modal')?.hidden
 
+  /**
+   * The last question, and the only one that is not about mechanics.
+   *
+   * Asked at Save rather than at the start, because at the start nobody knows
+   * yet what they are about to build — and asked at all because it is the one
+   * thing about a workflow that cannot be worked out from it. The steps, the
+   * inputs and what it produces all say what it *does*; an agent can read every
+   * one of them and still not know whether this is the right thing to call.
+   *
+   * Skippable. A description nobody wanted to write would be a worse one than
+   * none, and the tools say plainly when it is missing rather than papering
+   * over it with a generated sentence.
+   */
+  function askWhatFor() {
+    const save = (description) =>
+      send({ t: 'record.save', description }, (res) => {
+        if (res?.error) {
+          return dialog({
+            title: 'Not saved',
+            body: res.error,
+            confirm: 'Back to the panel',
+            cancel: 'Close',
+            onConfirm: () => null,
+          })
+        }
+        teardown()
+      })
+
+    dialog({
+      title: 'What is this workflow for?',
+      body:
+        'One line, for whoever reaches for it later — including your agent, which reads this to ' +
+        'decide whether to call it. Say what it is good for, not what the steps do.',
+      field: { placeholder: 'Generates one illustration from a full prompt' },
+      confirm: 'Save workflow',
+      cancel: 'Save without one',
+      onCancel: () => save(''),
+      onConfirm: (value) => {
+        save(value)
+        return null
+      },
+    })
+  }
+
   function askForName() {
     dialog({
       title: 'Name this workflow',
@@ -1478,18 +1522,7 @@
           () => teardown(),
         )
       case 'save':
-        return send({ t: 'record.save' }, (res) => {
-          if (res?.error) {
-            return dialog({
-              title: 'Not saved',
-              body: res.error,
-              confirm: 'Back to the panel',
-              cancel: 'Close',
-              onConfirm: () => null,
-            })
-          }
-          teardown()
-        })
+        return askWhatFor()
       case 'restart':
         return dialog({
           title: 'Start this workflow over?',

@@ -61,6 +61,9 @@ export interface RecordedStep {
 export interface DraftInput {
   name: string
   projectId?: string
+  /** What the person said it is for. Empty when they were not asked, or when an
+   *  older extension saved the recording. */
+  description?: string
   origins: string[]
   raw: { startUrl?: string; steps?: RecordedStep[] } | unknown
 }
@@ -304,7 +307,13 @@ export function proposeWorkflow(draft: DraftInput): Workflow {
     // when it is persisted.
     projectId: draft.projectId ?? '',
     name: draft.name,
-    description: describe(draft.name, steps, inputs),
+    // The person's own words or nothing at all. There used to be a generated
+    // sentence here — "Produces image from prompt by replaying 4 recorded
+    // steps" — which restated the mechanics the agent could already see and,
+    // worse, made an undescribed workflow indistinguishable from a described
+    // one. A summary is composed for display instead, so "nobody has said what
+    // this is for" stays a fact the tools can report.
+    description: (draft.description ?? '').trim(),
     // Never active. A recording that can run the moment it stops is a recording
     // nobody checked.
     status: 'draft',
@@ -318,13 +327,26 @@ export function proposeWorkflow(draft: DraftInput): Workflow {
   }
 }
 
-/** A one-line description that says what the thing does, so `list_workflows` is
- *  readable without opening every workflow. */
-function describe(name: string, steps: Step[], inputs: Workflow['inputs']): string {
-  const captured = steps.find((s) => s.kind === 'capture')
-  const verb = captured ? `Produces ${captured.capture?.as ?? 'an image'}` : 'Runs'
-  const takes = inputs.length ? ` from ${inputs.map((i) => i.name).join(', ')}` : ''
-  return `${verb}${takes} by replaying ${steps.length} recorded step${steps.length === 1 ? '' : 's'} (${name}).`
+/**
+ * What a workflow does, mechanically, for when nobody has said what it is for.
+ *
+ * Composed at display time rather than stored, which is the whole point: a
+ * stored fallback is indistinguishable from a description somebody wrote, so
+ * nothing can tell you that a workflow has never been explained. Every figure
+ * in it is already in the listing beside it, so it is a last resort and reads
+ * like one.
+ */
+export function summarise(w: {
+  /** A whole workflow carries its steps; the listing carries how many. Both
+   *  callers are real, and neither should have to reshape itself to ask. */
+  steps: number | readonly unknown[]
+  inputs: ReadonlyArray<{ name: string }>
+  produces: string
+}): string {
+  const count = Array.isArray(w.steps) ? w.steps.length : (w.steps as number)
+  const verb = w.produces === 'none' ? 'Runs' : `Produces ${w.produces}`
+  const takes = w.inputs.length ? ` from ${w.inputs.map((i) => i.name).join(', ')}` : ''
+  return `${verb}${takes} by replaying ${count} recorded step${count === 1 ? '' : 's'}.`
 }
 
 /** The values a test run types: whatever was typed while recording, for every

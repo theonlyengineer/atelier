@@ -642,7 +642,7 @@ async function discardRecording() {
   return { ok: true, discarded: rec.steps.length }
 }
 
-async function saveRecording() {
+async function saveRecording(description) {
   const rec = await getRecording()
   if (!rec) return { ok: false, error: 'no recording in progress' }
   if (!rec.name) return { ok: false, error: 'name the workflow before saving it' }
@@ -651,6 +651,10 @@ async function saveRecording() {
   const payload = {
     t: MSG.DRAFT_SAVE,
     name: rec.name,
+    // What it is for, in the person's words. The one thing about a workflow
+    // that is neither recorded nor derived, and the only thing that tells an
+    // agent whether to reach for it.
+    description: String(description ?? '').trim(),
     origins: rec.origins,
     raw: { startUrl: rec.startUrl, steps: rec.steps, recordedAt: new Date().toISOString() },
   }
@@ -793,7 +797,7 @@ async function route(msg, sendResponse) {
       sendResponse(await restartRecording())
       break
     case 'record.save':
-      sendResponse(await saveRecording())
+      sendResponse(await saveRecording(msg.description))
       break
     case 'record.discard':
       sendResponse(await discardRecording())

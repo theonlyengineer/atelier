@@ -20,7 +20,7 @@ import { join } from 'node:path'
 
 process.env.ATELIER_HOME = mkdtempSync(join(tmpdir(), 'atelier-propose-'))
 
-const { proposeWorkflow, sampleInputs } = await import('../src/core/propose.ts')
+const { proposeWorkflow, sampleInputs, summarise } = await import('../src/core/propose.ts')
 
 const sel = (candidates: Array<[string, string, number]>) =>
   candidates.map(([strategy, value, score]) => ({ strategy, value, score })) as never
@@ -258,4 +258,48 @@ test('produces is taken from what was captured', () => {
 test('an unknown action from a newer extension is treated as a click rather than fatal', () => {
   const wf = propose([step({ kind: 'teleport' })])
   assert.equal(wf.steps[1]!.kind, 'click')
+})
+
+/* ---------------------------------------------------------- what it is for */
+
+/**
+ * The only field on a workflow that is neither recorded nor derived.
+ *
+ * Everything else — the steps, the inputs, what it produces — says what a
+ * workflow *does*, and an agent can read all of it. None of it says whether
+ * this is the right thing to call, which is the question an agent actually has.
+ */
+
+test('the words the person wrote are the description, verbatim', () => {
+  const wf = propose([step()], {
+    description: '  Generates one illustration from a full prompt  ',
+  })
+  assert.equal(wf.description, 'Generates one illustration from a full prompt')
+})
+
+test('no description is no description, not a generated sentence', () => {
+  // There used to be one composed here — "Produces image from prompt by
+  // replaying 4 recorded steps" — which restated what the listing already
+  // showed and, worse, made an undescribed workflow indistinguishable from a
+  // described one. Nothing could then report that it had never been explained.
+  assert.equal(propose([step()]).description, '')
+  assert.equal(propose([step()], { description: '   ' }).description, '')
+})
+
+test('the mechanical summary is composed for display, and says only what it can', () => {
+  const wf = propose([
+    step({ kind: 'type', target: 'Prompt', valueMode: 'dynamic', sampleValue: 'x' }),
+    step({ kind: 'capture', capture: { as: 'image' } }),
+  ])
+  assert.equal(summarise(wf), 'Produces image from prompt by replaying 3 recorded steps.')
+  assert.equal(
+    summarise({ steps: [1], inputs: [], produces: 'none' }),
+    'Runs by replaying 1 recorded step.',
+  )
+  // The listing hands it a count rather than the steps, which is how this first
+  // reached an agent reading "by replaying undefined recorded steps".
+  assert.equal(
+    summarise({ steps: 4, inputs: [{ name: 'prompt' }], produces: 'image' }),
+    'Produces image from prompt by replaying 4 recorded steps.',
+  )
 })

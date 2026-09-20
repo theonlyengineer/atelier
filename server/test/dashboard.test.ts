@@ -899,7 +899,7 @@ test('a workflow has a page of its own, reachable by name from anywhere', skip, 
   repo.setActiveProject(project.id)
   repo.saveWorkflow({
     name: 'has-a-page',
-    description: 'test',
+    description: '',
     status: 'active',
     origins: ['https://x.test'],
     profileId: null,
@@ -1043,6 +1043,79 @@ test('a clashing input name is refused, and the page says so', skip, async () =>
   assert.match(said as string, /already asks the agent for/i)
 
   assert.equal(repo.getWorkflowByName('two-fields')!.steps[1]!.valueMode, 'static', 'unchanged')
+  await page.close()
+})
+
+test('an undescribed workflow says so, and can be described from its page', skip, async () => {
+  // The fallback is composed at render time rather than stored, so "nobody has
+  // explained this" stays a fact the page can report. A generated sentence in
+  // the same voice as a written one is how a library ends up looking
+  // documented when nothing has been documented.
+  repo.saveWorkflow({
+    projectId: repo.activeProject().id,
+    name: 'needs-describing',
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'image',
+    steps: [
+      {
+        id: 'n1',
+        kind: 'click',
+        target: 'Generate',
+        timeoutMs: 30000,
+        note: 'Click Generate',
+        selectors: [{ strategy: 'id', value: '#g', score: 92 }],
+      },
+    ],
+  } as never)
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/needs-describing'`)
+  await page.waitForSelector('#workflow-one [data-edit-desc]', { timeout: 8000 })
+
+  const before = (await page.evaluate(
+    `document.querySelector('#workflow-one .wf-desc').textContent`,
+  )) as string
+  assert.match(before, /nobody has said what this is for/i)
+
+  await page.click('#workflow-one [data-edit-desc]')
+  await page.waitForSelector('#wf-desc', { timeout: 4000 })
+  await page.evaluate(
+    `document.getElementById('wf-desc').value = 'Generates one illustration from a full prompt'`,
+  )
+  await page.click('#workflow-one [data-save-desc]')
+  // Null-safe: the page redraws twice around this write — once from the state
+  // frame the write itself causes, once to close the editor — and a predicate
+  // that dereferences the element fails on whichever poll lands between them.
+  await page.waitForFunction(
+    `(document.querySelector('#workflow-one .wf-desc')?.textContent || '').includes('one illustration')`,
+    { timeout: 8000 },
+  )
+  assert.equal(
+    repo.getWorkflowByName('needs-describing')!.description,
+    'Generates one illustration from a full prompt',
+  )
+  await page.close()
+})
+
+test('the listing says which workflows nobody has explained', skip, async () => {
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflows'`)
+  await page.waitForFunction(
+    `document.querySelector('#workflows').innerText.includes('needs-describing')`,
+    { timeout: 8000 },
+  )
+  // Described by the test above, so this one is about the *other* fixture —
+  // the point being that an absent description reads as absent rather than as
+  // a sentence somebody wrote.
+  const undescribed = await page.evaluate(
+    `[...document.querySelectorAll('#workflows .wf')].some(el =>
+       el.querySelector('.wf-desc.none') && el.innerText.includes('not described yet'))`,
+  )
+  assert.equal(undescribed, true)
   await page.close()
 })
 

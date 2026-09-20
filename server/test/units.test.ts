@@ -207,6 +207,7 @@ test('read-only routes are the exception; anything else announces a change', asy
     '/api/workflows.activate',
     '/api/workflows.delete',
     '/api/workflows.replaceStep',
+    '/api/workflows.setDescription',
     '/api/workflows.setStatus',
     '/api/workflows.setStepValue',
     '/api/workflows.test',

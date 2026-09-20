@@ -137,6 +137,16 @@ export const routes: Record<string, Handler> = {
     return { workflow: repo.setWorkflowStatus(w.id, 'active') }
   },
 
+  /** Say what a workflow is for. The one thing about it that cannot be derived
+   *  from the recording, and the only thing that tells an agent when to reach
+   *  for it rather than what it will do once it has. */
+  '/api/workflows.setDescription': (b) => {
+    const name = b?.name ?? missing('name')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    return { workflow: repo.setWorkflowDescription(w.id, b?.description ?? null) }
+  },
+
   /**
    * Turn a workflow off without deleting it.
    *

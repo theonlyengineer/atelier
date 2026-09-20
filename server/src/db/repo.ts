@@ -663,6 +663,21 @@ export function setStepValue(
   return saveWorkflow({ ...wf, steps, inputs: inputsFrom(steps) })
 }
 
+/**
+ * Say what a workflow is for, in the words of whoever knows.
+ *
+ * The one field on a workflow that is neither recorded nor derived. Everything
+ * else — the steps, the inputs, what it produces — says what it *does*, which
+ * an agent can already see; this says when to reach for it, which nothing else
+ * anywhere can supply. Empty clears it, and an empty description is honestly
+ * reported as one rather than filled in with a generated sentence.
+ */
+export function setWorkflowDescription(id: string, description: string | null): Workflow {
+  const wf = getWorkflow(id)
+  if (!wf) throw new Error(`no workflow ${id}`)
+  return saveWorkflow({ ...wf, description: (description ?? '').trim() })
+}
+
 export function setWorkflowStatus(id: string, status: WorkflowStatus): Workflow {
   const wf = getWorkflow(id)
   if (!wf) throw new Error(`no workflow ${id}`)

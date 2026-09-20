@@ -1075,3 +1075,59 @@ test('a recorded value can be renamed onto a free name, but not onto a taken one
   await page.waitForFunction(`window.__steps()[1].inputName === 'main_subject'`)
   await page.close()
 })
+
+/* ---------------------------------------------------- what it is for */
+
+/**
+ * The one question the panel asks that is not about mechanics.
+ *
+ * Everything else a workflow carries says what it *does*, and an agent reads
+ * all of it. None of it says whether this is the right thing to call — so the
+ * person who just built it is asked, at the one moment they certainly know.
+ */
+
+test('saving asks what the workflow is for, and sends the answer', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await pointAt(page, '#go')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+
+  await page.click('#atelier-root [data-act="save"]')
+  await page.waitForSelector('#atelier-root .at-modal:not([hidden])')
+  const asked = await page.evaluate(`document.querySelector('#atelier-root .at-modal h2').textContent`)
+  assert.match(asked as string, /what is this workflow for/i)
+
+  await page.evaluate(`(() => {
+    document.querySelector('#atelier-root .at-modal .at-input').value =
+      'Generates one illustration from a full prompt'
+  })()`)
+  await page.click('#atelier-root .at-modal .at-primary')
+  await page.waitForFunction(`window.__sent.some(m => m.t === 'record.save')`)
+  const saved = (await page.evaluate(`window.__sent.find(m => m.t === 'record.save')`)) as any
+  assert.equal(saved.description, 'Generates one illustration from a full prompt')
+  await page.close()
+})
+
+test('it can be skipped, because a description nobody wanted to write is worse than none', skip, async () => {
+  const page = await pageWith(`<button id="go">Generate</button>`)
+  await pointAt(page, '#go')
+  await page.click('#atelier-root [data-act="add"]')
+  await page.waitForFunction(`window.__steps().length === 1`)
+
+  await page.click('#atelier-root [data-act="save"]')
+  await page.waitForSelector('#atelier-root .at-modal:not([hidden])')
+  await page.click('#atelier-root .at-modal .at-ghost')
+  await page.waitForFunction(`window.__sent.some(m => m.t === 'record.save')`)
+  const saved = (await page.evaluate(`window.__sent.find(m => m.t === 'record.save')`)) as any
+  assert.equal(saved.description, '')
+  await page.close()
+})
+
+test('the question comes at Save, not at the start', skip, async () => {
+  // At the start nobody knows yet what they are about to build.
+  const page = await pageWith(`<button id="go">Generate</button>`, { name: '' })
+  await page.waitForSelector('#atelier-root .at-modal:not([hidden])')
+  const first = await page.evaluate(`document.querySelector('#atelier-root .at-modal h2').textContent`)
+  assert.match(first as string, /name this workflow/i)
+  await page.close()
+})

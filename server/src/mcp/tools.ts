@@ -14,6 +14,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { NeedsProject, type Session } from './session.ts'
+import { summarise } from '../core/propose.ts'
 import type { Asset, Job, Workflow } from '../types.ts'
 
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s }] })
@@ -207,9 +208,23 @@ export function buildServer(session: Session): McpServer {
           : '(none)'
         const health = w.health?.state && w.health.state !== 'ok' ? `   health: ${w.health.state}` : ''
         const pending = w.status === 'draft' ? '   [awaiting activation in the popup]' : ''
-        return `• ${w.name} — ${w.description}\n    produces: ${w.produces}   inputs: ${inputs}   steps: ${w.steps}${health}${pending}`
+        // The description is the only thing here that says what a workflow is
+        // *for*; everything else says what it does. When nobody has written one
+        // the mechanical summary stands in — and says that it is standing in,
+        // because a generated sentence that reads like a description is worse
+        // than an admission that there is none.
+        const what = w.description?.trim()
+          ? w.description.trim()
+          : `${summarise(w)}  (nobody has said what this is for — describe_workflow, once you know)`
+        return `• ${w.name} — ${what}\n    produces: ${w.produces}   inputs: ${inputs}   steps: ${w.steps}${health}${pending}`
       })
-      return text(lines.join('\n'))
+      return text(
+        lines.join('\n') +
+          '\n\nThe description is what tells you whether to reach for one of these. If it is ' +
+          'missing, get_workflow shows the steps and what each acts on, which is usually enough ' +
+          'to work out — and describe_workflow is how you write that down so nobody has to work ' +
+          'it out again.',
+      )
     },
   )
 
@@ -279,6 +294,39 @@ export function buildServer(session: Session): McpServer {
       return text(
         `Job ${job.id} done. Produced:\n${lines.join('\n')}\n\nUse save_asset to write one into the repo.`,
       )
+    },
+  )
+
+  server.registerTool(
+    'describe_workflow',
+    {
+      title: 'Say what a workflow is for',
+      description:
+        "Record, in a sentence or two, what a workflow is for and when to reach for it — not what its steps do. The steps, the inputs and what it produces already say what it *does*, and an agent can read all of them; none of that says whether this is the right thing to call. It is the only field on a workflow that is neither recorded nor derived, so if it is missing nobody can supply it but you and the person you are working with. Write one whenever you work out what an undescribed workflow is good for, and say you have. Pass an empty description to clear it.",
+      inputSchema: {
+        name: z.string().describe('Workflow name from list_workflows.'),
+        description: z
+          .string()
+          .max(2000)
+          .describe(
+            'What it is for, plainly. "Generates one illustration from a full prompt, in the account that is already signed in", not "types into a box and clicks a button".',
+          ),
+      },
+    },
+    async ({ name, description }) => {
+      try {
+        const { workflow } = await call<{ workflow: Workflow }>('/api/workflows.setDescription', {
+          name,
+          description,
+        })
+        return text(
+          workflow.description
+            ? `Described "${workflow.name}": ${workflow.description}`
+            : `Cleared the description on "${workflow.name}".`,
+        )
+      } catch (e) {
+        return fail((e as Error).message)
+      }
     },
   )
 

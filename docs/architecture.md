@@ -174,6 +174,26 @@ So the only knob is patience, set per step when the workflow is saved: 30
 seconds for an ordinary step, three minutes for a capture, three minutes for an
 explicit wait.
 
+## What a workflow is for
+
+Everything a workflow carries is either recorded or derived — the steps, the
+selectors, the inputs, what it produces — and all of it answers *what it does*.
+An agent can read the lot and still not know whether this is the right thing to
+call, which is the question it actually has.
+
+So the description is the one field that is neither. It is asked for in the
+panel at Save, when the person certainly knows; editable on the workflow's page,
+because the answer usually gets better after a few runs; and writable by an
+agent through `describe_workflow`, so that working it out once from the steps
+does not have to happen twice.
+
+When there is none, `summarise()` composes a mechanical line at display time —
+"Produces image from prompt by replaying 4 recorded steps" — and says that it is
+standing in. That sentence used to be *stored* as the description by the
+proposal pass, which made an undescribed workflow indistinguishable from a
+described one: nothing could report that a workflow had never been explained,
+and a library of them read as documented when none of it was.
+
 ## One name, one value
 
 A workflow's inputs are derived from its steps, so two dynamic steps with the

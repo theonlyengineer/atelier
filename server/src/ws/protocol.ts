@@ -62,7 +62,7 @@ export type ClientMsg =
     }
   | { t: 'job.resume'; jobId: string }
   | { t: 'job.cancel'; jobId: string }
-  | { t: 'draft.save'; name: string; origins: string[]; raw: unknown }
+  | { t: 'draft.save'; name: string; description?: string; origins: string[]; raw: unknown }
   /** One step pointed at a new element, to repair a workflow whose page moved
    *  rather than re-recording the whole thing. Only the selectors and the name
    *  change; what the step *does* was decided once and stands. */
