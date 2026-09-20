@@ -120,6 +120,17 @@ export interface Workflow {
   steps: Step[]
   /** What this workflow produces, so Claude knows whether to reach for it. */
   produces: 'image' | 'text' | 'file' | 'none'
+  /**
+   * How long to wait between steps, in milliseconds.
+   *
+   * Never below a second. Replay already retries a selector until the step's
+   * timeout, so this is not about finding an element — it is about the page
+   * being *ready* for the next thing after the last one: a framework that
+   * re-renders, a handler that runs on the next tick, an animation that has to
+   * finish before a click lands where it looks like it will. Those are not
+   * waits anything can observe, so the only honest answer is to pause.
+   */
+  stepDelayMs: number
   createdAt: string
   updatedAt: string
 }

@@ -1349,3 +1349,144 @@ test('a selection cannot outlive what is in it', skip, async () => {
   await page.waitForFunction(`document.getElementById('bulk').hidden === true`, { timeout: 8000 })
   await page.close()
 })
+
+/* ----------------------------------------- editing a workflow after the fact */
+
+/** A workflow with three steps, one of which should not be there. */
+function strayStep(name: string) {
+  const step = (id: string, target: string, over: Record<string, unknown> = {}) => ({
+    id,
+    kind: 'click',
+    target,
+    timeoutMs: 30000,
+    note: 'Click ' + target,
+    selectors: [{ strategy: 'id', value: '#' + id, score: 92 }],
+    ...over,
+  })
+  return repo.saveWorkflow({
+    projectId: repo.activeProject().id,
+    name,
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [
+      step('one', 'Prompt', {
+        kind: 'type',
+        valueMode: 'dynamic',
+        inputName: 'prompt',
+        sampleValue: 'a rope bridge',
+        value: '{{prompt}}',
+      }),
+      step('stray', 'Somewhere else'),
+      step('three', 'Generate'),
+    ],
+  } as never)
+}
+
+test('a step in the middle can be removed from its page', skip, async () => {
+  // Not offered while recording, and the difference is the argument: a
+  // recording has to keep describing what was actually performed, whereas a
+  // saved workflow is an artifact being maintained — and the alternative to
+  // dropping one stray click is re-recording the other nineteen.
+  const project = repo.createProject('Remove A Step')
+  repo.setActiveProject(project.id)
+  strayStep('has-a-stray')
+
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/has-a-stray'`)
+  await page.waitForFunction(`document.querySelectorAll('#workflow-one .steps li').length === 3`, {
+    timeout: 8000,
+  })
+
+  await page.click('#workflow-one [data-drop-step="stray"]')
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  // It says what it is removing and that it cannot be undone.
+  const asked = (await page.evaluate(`document.querySelector('#ask-card p').textContent`)) as string
+  assert.match(asked, /Somewhere else/)
+  assert.match(asked, /cannot be undone/i)
+  await page.click('#ask-go')
+
+  await page.waitForFunction(`document.querySelectorAll('#workflow-one .steps li').length === 2`, {
+    timeout: 8000,
+  })
+  const left = repo.getWorkflowByName('has-a-stray')!
+  assert.deepEqual(left.steps.map((s) => s.id), ['one', 'three'])
+  await page.close()
+})
+
+test('declining leaves the step exactly where it was', skip, async () => {
+  strayStep('keep-the-stray')
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/keep-the-stray'`)
+  await page.waitForSelector('#workflow-one [data-drop-step="stray"]', { timeout: 8000 })
+  await page.click('#workflow-one [data-drop-step="stray"]')
+  await page.waitForSelector('#ask[open]', { timeout: 4000 })
+  await page.click('#ask-stop')
+  await new Promise((r) => setTimeout(r, 400))
+  assert.equal(repo.getWorkflowByName('keep-the-stray')!.steps.length, 3)
+  await page.close()
+})
+
+test('the last step offers no Remove at all', skip, async () => {
+  repo.saveWorkflow({
+    projectId: repo.activeProject().id,
+    name: 'only-one-step',
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    steps: [
+      { id: 'solo', kind: 'click', target: 'Go', timeoutMs: 30000, note: 'Click Go',
+        selectors: [{ strategy: 'id', value: '#g', score: 92 }] },
+    ],
+  } as never)
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/only-one-step'`)
+  await page.waitForFunction(`document.querySelectorAll('#workflow-one .steps li').length === 1`, {
+    timeout: 8000,
+  })
+  assert.equal(
+    await page.evaluate(`document.querySelectorAll('#workflow-one [data-drop-step]').length`),
+    0,
+    'a control that always refuses teaches people to ignore controls',
+  )
+  await page.close()
+})
+
+test('the pause between steps is shown in seconds and can be changed', skip, async () => {
+  strayStep('has-a-pause')
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/has-a-pause'`)
+  await page.waitForSelector('#wf-delay', { timeout: 8000 })
+  assert.equal(await page.evaluate(`document.getElementById('wf-delay').value`), '1')
+
+  await page.evaluate(`document.getElementById('wf-delay').value = '2.5'`)
+  await page.click('#workflow-one [data-save-delay]')
+  await page.waitForFunction(`document.getElementById('wf-delay').value === '2.5'`, { timeout: 8000 })
+  assert.equal(repo.getWorkflowByName('has-a-pause')!.stepDelayMs, 2500)
+  await page.close()
+})
+
+test('a pause below a second is refused by the floor, not by the form', skip, async () => {
+  // The input says min=1, but the clamp lives in one place on the server so
+  // every road in arrives at the same answer.
+  strayStep('pause-floor')
+  const page = await open()
+  await page.evaluate(`location.hash = '#workflow/pause-floor'`)
+  await page.waitForSelector('#wf-delay', { timeout: 8000 })
+  assert.equal(await page.evaluate(`document.getElementById('wf-delay').getAttribute('min')`), '1')
+
+  await page.evaluate(`
+    fetch('/api/workflows.setStepDelay', { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'pause-floor', stepDelayMs: 50 }) })
+  `)
+  await new Promise((r) => setTimeout(r, 600))
+  assert.equal(repo.getWorkflowByName('pause-floor')!.stepDelayMs, 1000)
+  await page.close()
+})

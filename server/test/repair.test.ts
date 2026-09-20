@@ -260,3 +260,118 @@ test('a dynamic value with no usable name at all is refused', () => {
     /name the agent can pass it under/i,
   )
 })
+
+/* --------------------------------------------------- taking a step out */
+
+/**
+ * Removing one step from a saved workflow.
+ *
+ * Deliberately not offered while recording, and the difference is the whole
+ * argument: during a recording each step is performed against the page the
+ * previous one left behind, so a list you can edit in the middle stops
+ * describing anything that was actually done. A saved workflow is not that. It
+ * is an artifact being maintained, and the alternative to dropping one stray
+ * click from it is re-recording the other nineteen — which is the cost the
+ * repair path exists to avoid.
+ */
+
+const threeSteps = (name: string) =>
+  repo.saveWorkflow({
+    name,
+    description: 'test',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'image',
+    steps: [
+      {
+        id: 'one',
+        kind: 'type',
+        target: 'Prompt',
+        selectors: [{ strategy: 'id', value: '#p', score: 92 }],
+        valueMode: 'dynamic',
+        inputName: 'prompt',
+        sampleValue: 'a rope bridge',
+        value: '{{prompt}}',
+        timeoutMs: 30000,
+      },
+      {
+        id: 'stray',
+        kind: 'click',
+        target: 'Somewhere else',
+        selectors: [{ strategy: 'id', value: '#stray', score: 92 }],
+        valueMode: 'dynamic',
+        inputName: 'stray_value',
+        timeoutMs: 30000,
+      },
+      {
+        id: 'three',
+        kind: 'capture',
+        target: 'The result',
+        selectors: [{ strategy: 'id', value: '#out', score: 92 }],
+        capture: { as: 'image' },
+        timeoutMs: 180000,
+      },
+    ],
+  } as never)
+
+test('a step in the middle comes out, and the rest keep their order', () => {
+  const wf = threeSteps('drop-middle')
+  const after = repo.removeStep(wf.id, 'stray')
+  assert.deepEqual(after.steps.map((s) => s.id), ['one', 'three'])
+})
+
+test('what it asked the agent for stops being asked', () => {
+  // Inputs are derived from the steps, so a removed dynamic step that kept its
+  // name in the signature would leave the agent supplying a value nothing types.
+  const wf = threeSteps('drop-input')
+  // Derived from the steps the moment anything edits them, so the assertion is
+  // about what the workflow ends up declaring rather than what the fixture was
+  // handed.
+  const after = repo.removeStep(wf.id, 'stray')
+  assert.deepEqual(after.inputs.map((i) => i.name), ['prompt'])
+  assert.equal(after.steps.some((s) => s.inputName === 'stray_value'), false)
+})
+
+test('a wait for the thing just removed goes with it', () => {
+  // Left alone it would sit out its whole timeout — three minutes, for a
+  // capture — waiting for something nobody is going to take.
+  const wf = threeSteps('drop-wait')
+  const withWait = repo.replaceStep(wf.id, 'stray', {
+    waitAfter: { kind: 'visible', selectors: [{ strategy: 'id', value: '#out', score: 92 }] },
+  } as never)
+  assert.ok(withWait.steps.find((s) => s.id === 'stray')!.waitAfter)
+
+  const after = repo.removeStep(wf.id, 'three')
+  assert.equal(after.steps.find((s) => s.id === 'stray')!.waitAfter, undefined)
+})
+
+test('a wait for something else is left exactly where it is', () => {
+  const wf = threeSteps('keep-other-wait')
+  repo.replaceStep(wf.id, 'stray', {
+    waitAfter: { kind: 'visible', selectors: [{ strategy: 'id', value: '#spinner', score: 92 }] },
+  } as never)
+  const after = repo.removeStep(wf.id, 'three')
+  assert.ok(after.steps.find((s) => s.id === 'stray')!.waitAfter, 'not ours to clear')
+})
+
+test('what a removed step matched on is forgotten with it', () => {
+  const wf = threeSteps('drop-health')
+  repo.recordStepMatch(wf.id, 'stray', 'xpath', 30)
+  repo.removeStep(wf.id, 'stray')
+  assert.equal(repo.stepMatches(wf.id).some((m) => m.stepId === 'stray'), false)
+})
+
+test('the last step cannot be removed — that is deleting the workflow', () => {
+  const wf = threeSteps('drop-last')
+  repo.removeStep(wf.id, 'stray')
+  repo.removeStep(wf.id, 'three')
+  assert.throws(() => repo.removeStep(wf.id, 'one'), /at least one step/)
+  assert.equal(repo.getWorkflow(wf.id)!.steps.length, 1, 'and it is still there')
+})
+
+test('a step that is not there is an error, not a silent no-op', () => {
+  const wf = threeSteps('drop-missing')
+  assert.throws(() => repo.removeStep(wf.id, 'nope'), /no step nope/)
+})

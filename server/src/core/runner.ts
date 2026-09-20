@@ -27,6 +27,12 @@ export interface RunnerDeps {
   onChange: () => void
   /** Ask the OS to raise a notification. Injected so tests don't shell out. */
   notify?: (title: string, body: string) => void
+  /**
+   * How the pause between steps is taken. Injected so a test can assert the
+   * delay was asked for without sitting through it — a suite that really waits
+   * a second per step stops being run.
+   */
+  wait?: (ms: number, then: () => void) => void
 }
 
 export class Runner {
@@ -39,6 +45,26 @@ export class Runner {
   constructor(deps: RunnerDeps) {
     this.deps = deps
     deps.hub.onMessage((msg, client) => this.handle(msg, client))
+  }
+
+  /**
+   * Let the page settle before the next step.
+   *
+   * Not the same thing as waiting for an element: replay already retries a
+   * selector until the step's timeout, so anything that can be waited *for* is
+   * already handled. This is for what cannot be — a framework re-rendering, a
+   * handler that runs on the next tick, an animation finishing so a click lands
+   * where it looks like it will. None of those announce themselves, so the only
+   * honest answer is a pause, and a second is the floor because a page that
+   * does not need one is not harmed by it.
+   *
+   * Between steps only. Nothing waits before the first, and nothing waits after
+   * the last.
+   */
+  private settle(workflow: Workflow, then: () => void): void {
+    const ms = Math.max(1000, Math.round(workflow.stepDelayMs ?? 1000))
+    const wait = this.deps.wait ?? ((delay, run) => { setTimeout(run, delay).unref?.() })
+    wait(ms, then)
   }
 
   /** Queue a job and try to start it immediately. */
@@ -182,7 +208,15 @@ export class Runner {
         }
         repo.addJobEvent(msg.jobId, 'step.ok', { index: msg.stepIndex, matched: msg.matched ?? null })
         repo.updateJob(msg.jobId, { stepIndex: msg.stepIndex + 1 })
-        this.pump(msg.jobId)
+
+        // Nothing to settle for if that was the last step: finish now rather
+        // than making every run a second longer than it needs to be.
+        const workflow = repo.getWorkflow(job.workflowId)
+        if (!workflow || msg.stepIndex + 1 >= workflow.steps.length) {
+          this.pump(msg.jobId)
+        } else {
+          this.settle(workflow, () => this.pump(msg.jobId))
+        }
         break
       }
       case 'step.fail': {

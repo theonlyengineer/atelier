@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DB_PATH, ensureDirs } from '../paths.ts'
 
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 /**
  * A project's bearer token.
@@ -144,6 +144,17 @@ function migrate(db: DatabaseSync): void {
     `)
     db.exec(`PRAGMA foreign_keys = ON`)
     db.exec(`CREATE INDEX IF NOT EXISTS workflow_project_idx ON workflow(project_id)`)
+  }
+
+  // After the rebuild above, never before it: that rebuild names the columns it
+  // copies, so a column added to the old table first is simply dropped on the
+  // way through and the check here would already have passed.
+  if (!columns('workflow').includes('step_delay_ms')) {
+    // Existing workflows get the same second everything else does. They ran
+    // without one, so this is a change in their behaviour — a deliberate one:
+    // the pages they drive have the same tick between a click and being ready
+    // for the next, whether or not anyone noticed it failing.
+    db.exec(`ALTER TABLE workflow ADD COLUMN step_delay_ms INTEGER NOT NULL DEFAULT 1000`)
   }
 
   // A project that predates per-project tokens has an empty one. Filled before

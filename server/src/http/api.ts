@@ -189,6 +189,31 @@ export const routes: Record<string, Handler> = {
     }
   },
 
+  /** How long a workflow settles between steps. Clamped to a second, which is
+   *  the floor as well as the default. */
+  '/api/workflows.setStepDelay': (b) => {
+    const name = b?.name ?? missing('name')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    return { workflow: repo.setStepDelay(w.id, b?.stepDelayMs) }
+  },
+
+  /**
+   * Take one step out of a saved workflow.
+   *
+   * Not offered while recording — there, each step was performed against the
+   * page the last one left, so the list has to keep describing what happened.
+   * A saved workflow is an artifact being maintained, and re-recording twenty
+   * steps to drop one stray click is the cost this avoids.
+   */
+  '/api/workflows.removeStep': (b) => {
+    const name = b?.name ?? missing('name')
+    const stepId = b?.stepId ?? missing('stepId')
+    const w = repo.getWorkflowByName(name)
+    if (!w) throw new Error(`no workflow named ${name}`)
+    return { workflow: repo.removeStep(w.id, stepId) }
+  },
+
   /** Edit one step in place. The repair path for a workflow whose page moved:
    *  the other nineteen steps were reviewed once and are still fine. */
   '/api/workflows.replaceStep': (b) => {

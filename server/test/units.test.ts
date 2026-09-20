@@ -207,6 +207,8 @@ test('read-only routes are the exception; anything else announces a change', asy
     '/api/workflows.activate',
     '/api/workflows.delete',
     '/api/workflows.replaceStep',
+    '/api/workflows.removeStep',
+    '/api/workflows.setStepDelay',
     '/api/workflows.setDescription',
     '/api/workflows.setStatus',
     '/api/workflows.setStepValue',
@@ -294,4 +296,100 @@ test('deleting an asset leaves the job that produced it alone', async () => {
 
   assets.remove(a.id)
   assert.ok(repo.getJob(job.id), 'the run is still there')
+})
+
+/* ------------------------------------------------ settling between steps */
+
+/**
+ * The pause a workflow takes between one step and the next.
+ *
+ * Not the same thing as waiting for an element: replay already retries a
+ * selector until the step's own timeout, so anything that can be waited *for*
+ * is handled. This is for what cannot be — a framework re-rendering, a handler
+ * on the next tick, an animation finishing so a click lands where it looks like
+ * it will. None of those announce themselves.
+ */
+
+test('a second is the default, the floor, and what nonsense falls back to', async () => {
+  const { stepDelay, MIN_STEP_DELAY_MS } = await import('../src/db/repo.ts')
+  assert.equal(MIN_STEP_DELAY_MS, 1000)
+  assert.equal(stepDelay(undefined), 1000)
+  assert.equal(stepDelay(null), 1000)
+  assert.equal(stepDelay(0), 1000)
+  assert.equal(stepDelay(-5000), 1000, 'below the floor is somebody asking for a race')
+  assert.equal(stepDelay('nonsense'), 1000)
+  assert.equal(stepDelay(2500), 2500)
+  assert.equal(stepDelay(2500.4), 2500)
+})
+
+test('the floor holds however the value arrives', async () => {
+  const repo = await import('../src/db/repo.ts')
+  const wf = repo.saveWorkflow({
+    name: 'delay-floor',
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    stepDelayMs: 10,
+    steps: [{ id: 's', kind: 'click', selectors: [{ strategy: 'id', value: '#a', score: 92 }], timeoutMs: 1000 }],
+  } as never)
+  assert.equal(wf.stepDelayMs, 1000, 'clamped on the way in')
+  assert.equal(repo.setStepDelay(wf.id, 250).stepDelayMs, 1000)
+  assert.equal(repo.setStepDelay(wf.id, 3000).stepDelayMs, 3000)
+  // And it survives an edit that is about something else entirely.
+  assert.equal(repo.setWorkflowStatus(wf.id, 'disabled').stepDelayMs, 3000)
+})
+
+test('the runner settles between steps, and not around the edges of a run', async () => {
+  const repo = await import('../src/db/repo.ts')
+  const { Runner } = await import('../src/core/runner.ts')
+
+  const step = (id: string) => ({
+    id,
+    kind: 'click',
+    selectors: [{ strategy: 'id', value: '#' + id, score: 92 }],
+    timeoutMs: 1000,
+  })
+  const wf = repo.saveWorkflow({
+    name: 'delay-runner',
+    description: '',
+    status: 'active',
+    origins: ['https://x.test'],
+    profileId: null,
+    inputs: [],
+    produces: 'none',
+    stepDelayMs: 2000,
+    steps: [step('a'), step('b'), step('c')],
+  } as never)
+
+  // A hub that answers every dispatched step immediately, so the only thing
+  // between steps is the pause under test.
+  const sent: number[] = []
+  const waited: number[] = []
+  let handler: any = null
+  const hub: any = {
+    onMessage: (h: any) => { handler = h },
+    clientFor: () => ({ profileId: 'p', label: 'x' }),
+    send: (_c: unknown, msg: any) => {
+      if (msg.t !== 'job.step') return
+      sent.push(msg.stepIndex)
+      queueMicrotask(() => handler({ t: 'step.ok', jobId: msg.jobId, stepIndex: msg.stepIndex }, {}))
+    },
+  }
+  const runner = new Runner({
+    hub,
+    onChange: () => {},
+    // Recorded rather than taken: a suite that really sits through a second a
+    // step stops being a suite anybody runs.
+    wait: (ms, then) => { waited.push(ms); then() },
+  })
+
+  const job = runner.start(repo.getWorkflow(wf.id)!, {})
+  await new Promise((r) => setTimeout(r, 50))
+
+  assert.deepEqual(sent, [0, 1, 2], 'every step ran')
+  assert.deepEqual(waited, [2000, 2000], 'twice for three steps — between them, not around them')
+  assert.equal(repo.getJob(job.id)!.status, 'done')
 })

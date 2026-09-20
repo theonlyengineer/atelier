@@ -322,6 +322,9 @@ export function proposeWorkflow(draft: DraftInput): Workflow {
     inputs,
     steps,
     produces: captured ? producesFromCapture : 'none',
+    // The floor, which is also the default. A page that needs no pause is not
+    // harmed by one, and a page that needs it gives no signal to wait on.
+    stepDelayMs: 1000,
     createdAt: now,
     updatedAt: now,
   }

@@ -699,6 +699,63 @@ export function buildServer(session: Session): McpServer {
   )
 
   server.registerTool(
+    'set_step_delay',
+    {
+      title: 'How long a workflow settles between steps',
+      description:
+        "Change the pause a workflow takes between one step and the next. This is not about finding an element — replay already retries a selector until the step's timeout — it is about the page being *ready* after the last thing: a framework re-rendering, a handler on the next tick, an animation that has to finish before a click lands where it looks like it will. None of those can be waited for, so the answer is a pause. One second is the default and the minimum; raise it for a site that is visibly slower to settle, and only after a run has actually failed on it.",
+      inputSchema: {
+        name: z.string().describe('Workflow name.'),
+        seconds: z
+          .number()
+          .min(1)
+          .max(60)
+          .describe('Seconds between steps. Below one is refused; a second is already the floor.'),
+      },
+    },
+    async ({ name, seconds }) => {
+      try {
+        const { workflow } = await call<{ workflow: Workflow }>('/api/workflows.setStepDelay', {
+          name,
+          stepDelayMs: Math.round(seconds * 1000),
+        })
+        return text(
+          `"${workflow.name}" now waits ${workflow.stepDelayMs / 1000}s between steps.`,
+        )
+      } catch (e) {
+        return fail((e as Error).message)
+      }
+    },
+  )
+
+  server.registerTool(
+    'remove_step',
+    {
+      title: 'Take one step out of a workflow',
+      description:
+        "Remove a step from a saved workflow, leaving the rest in order. For a step that should not be there — a stray click that got recorded, a wait the site no longer needs — where the alternative is asking the human to re-record the whole thing. It cannot be undone and the recording it came from is not changed, so confirm with the human first. If the step is wrong rather than surplus, prefer repair_step or set_step_value; if what it *does* is wrong, it has to be re-recorded, because a step nobody performed is a step nobody checked.",
+      inputSchema: {
+        name: z.string().describe('Workflow name.'),
+        stepId: z.string().describe('Step id, from get_workflow.'),
+      },
+    },
+    async ({ name, stepId }) => {
+      try {
+        const { workflow } = await call<{ workflow: Workflow }>('/api/workflows.removeStep', {
+          name,
+          stepId,
+        })
+        const inputs = workflow.inputs.map((i) => i.name).join(', ') || '(none)'
+        return text(
+          `Removed step ${stepId} from "${workflow.name}". ${workflow.steps.length} steps left; it now takes: ${inputs}`,
+        )
+      } catch (e) {
+        return fail((e as Error).message)
+      }
+    },
+  )
+
+  server.registerTool(
     'get_workflow',
     {
       title: 'Read a workflow in full',
@@ -816,6 +873,12 @@ export function buildServer(session: Session): McpServer {
     inputs: z.array(z.object({ name: z.string(), description: z.string(), required: z.boolean() })),
     steps: z.array(stepSchema),
     produces: z.enum(['image', 'text', 'file', 'none']),
+    stepDelayMs: z
+      .number()
+      .int()
+      .min(1000)
+      .optional()
+      .describe('Pause between steps, in milliseconds. One second is the default and the floor.'),
   })
 
   server.registerTool(

@@ -364,8 +364,18 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums}
   .step-box{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
     padding:12px 15px}
-  .step-row{display:grid;grid-template-columns:66px minmax(0,1fr);gap:12px;align-items:baseline;
+  .step-row{display:grid;grid-template-columns:66px minmax(0,1fr) auto;gap:12px;align-items:baseline;
     padding:2px 0}
+  /* Quiet until wanted: it is the one control on this page that cannot be
+     undone, and it sits beside nineteen steps that are perfectly fine. */
+  .step-drop{opacity:0;transition:opacity .15s}
+  .step-box:hover .step-drop,.step-drop:focus-visible{opacity:1}
+
+  .delay{display:flex;align-items:center;gap:10px}
+  .delay input{width:90px;font:inherit;font-size:13px;padding:8px 10px;border-radius:9px;
+    border:1px solid var(--line);background:var(--sunk);color:var(--ink)}
+  .delay input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  .delay span{color:var(--faint);font-size:13px}
   .step-k{font-size:9.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
     color:var(--faint)}
   .step-v{font-size:13px;overflow-wrap:anywhere}
@@ -1148,9 +1158,18 @@ function renderWorkflowPage() {
     if (step.kind === 'type' || step.kind === 'select') {
       value = editingStep === step.id ? stepEditor(w, step) : stepValue(step)
     }
+    // Offered only while there is more than one: a workflow with no steps is
+    // not a workflow, and a control that always refuses teaches people to stop
+    // reading controls.
+    const drop = (w.stepList || []).length > 1
+      ? '<button class="btn danger step-drop" data-drop-step="' + esc(step.id) + '" ' +
+        'data-drop-name="' + esc(w.name) + '" data-drop-what="' + esc(actionWords(step)) +
+        (step.target ? ' \u2014 ' + esc(step.target) : '') + '">Remove</button>'
+      : ''
     return '<li><span class="step-node">' + (i + 1) + '</span><div class="step-box">' +
       '<div class="step-row"><span class="step-k">Target</span>' +
-      '<span class="step-v">' + esc(step.target || (step.kind === 'navigate' ? 'the page' : '—')) + '</span></div>' +
+      '<span class="step-v">' + esc(step.target || (step.kind === 'navigate' ? 'the page' : '—')) + '</span>' +
+      drop + '</div>' +
       '<div class="step-row"><span class="step-k">Action</span>' +
       '<span class="step-v">' + esc(actionWords(step)) + '</span></div>' +
       value +
@@ -1196,10 +1215,22 @@ function renderWorkflowPage() {
     '</div>' +
     '<div class="card pad" style="margin-bottom:14px"><div class="sec-head"><h2>The agent passes</h2></div>' +
     inputs + '</div>' +
+    // Beside the signature rather than buried with the steps: it is a property
+    // of how the whole workflow runs, not of any one step in it.
+    '<div class="card pad" style="margin-bottom:14px">' +
+    '<div class="sec-head"><h2>Pause between steps</h2></div>' +
+    '<div class="delay"><input id="wf-delay" type="number" min="1" step="0.5" value="' +
+    ((w.stepDelayMs || 1000) / 1000) + '"><span>seconds</span>' +
+    '<button class="btn" data-save-delay="' + esc(w.name) + '">Save</button></div>' +
+    '<p class="hint">Not for finding things \u2014 replay already retries a selector until the ' +
+    'step gives up. This is for the page being ready afterwards: a re-render, a handler on the ' +
+    'next tick, an animation finishing before a click lands where it looks like it will. One ' +
+    'second is the minimum as well as the default.</p></div>' +
     '<div class="sec-head"><h2>Steps</h2></div>' +
     (steps ? '<ol class="steps">' + steps + '</ol>' : '<div class="empty">This workflow has no steps.</div>') +
-    '<p class="hint">A step\\'s action is what the person recording performed, so it is not editable —' +
-    ' only its value is. To change where a step looks, repoint it from the Atelier popup.</p>'
+    '<p class="hint">A step\\'s action is what the person recording performed, so it is not' +
+    ' editable — its value is, and a step that should not be here can be removed. To change' +
+    ' where a step looks, repoint it from the Atelier popup.</p>'
 }
 
 function stepValue(step) {
@@ -1816,6 +1847,37 @@ document.addEventListener('click', async (e) => {
       renderWorkflowPage()
     } catch (err) { tell('Could not save the value', err.message) }
     return
+  }
+
+  const saveDelay = e.target.closest('[data-save-delay]')
+  if (saveDelay) {
+    const seconds = Number($('wf-delay') ? $('wf-delay').value : 1)
+    try {
+      await post('/api/workflows.setStepDelay', {
+        name: saveDelay.dataset.saveDelay,
+        stepDelayMs: Math.round((seconds > 0 ? seconds : 1) * 1000),
+      })
+      renderWorkflowPage()
+    } catch (err) { tell('Could not save it', err.message) }
+    return
+  }
+
+  const dropStep = e.target.closest('[data-drop-step]')
+  if (dropStep) {
+    const d = dropStep.dataset
+    return ask({
+      title: 'Remove this step?',
+      body: d.dropWhat + '. The steps around it keep their order, and anything this one asked ' +
+        'the agent for stops being asked. It cannot be undone \u2014 the recording it came from ' +
+        'is not changed, so the only way back is to record the workflow again.',
+      confirm: 'Remove it',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await post('/api/workflows.removeStep', { name: d.dropName, stepId: d.dropStep })
+        } catch (err) { tell('Could not remove it', err.message) }
+      },
+    })
   }
 
   const test = e.target.closest('[data-test]')

@@ -77,11 +77,38 @@ Add step. That is what makes a step that cannot be performed get refused while
 somebody is still looking at the page. Never grow a second executor for
 recording; there would be nothing to keep the two in agreement.
 
-**A recorded step cannot be removed or re-actioned — only its value can change.**
-Enforced in three places on purpose: the panel offers no per-step delete, the
-dashboard's workflow page offers no action control, and the API has no route for
-either. A step list you can edit in the middle stops describing anything that
-was actually performed.
+**What a step *does* is never editable. Where it looks, what it types, and
+whether it is there at all are — but only on the dashboard.**
+
+The two halves are not the same rule and the distinction is the point. During a
+recording each step is performed against the page the previous one left behind,
+so a list you can edit in the middle stops describing anything that was actually
+done: the panel therefore offers no per-step delete and no way back to the
+action, and Start over is the only way back. A *saved* workflow is not that. It
+is an artifact being maintained, and the alternative to dropping one stray click
+from it is re-recording the other nineteen — exactly the cost `repair_step`
+exists to avoid. So `removeStep` is offered on the workflow's page and as
+`remove_step`, and nothing anywhere re-actions a step, because a step nobody
+performed is a step nobody checked.
+
+Removal takes three things with it, and leaving any one is a bug that surfaces
+later and somewhere else: the step's health, because what it matched on says
+nothing about anything now; a `waitAfter` on another step whose selectors are
+exactly the removed step's, or it sits out its whole timeout waiting for
+something nobody will take; and the workflow's signature, which is derived from
+the steps, so a removed dynamic step stops the agent being asked for a value
+nothing types.
+
+**A workflow settles between steps, and a second is the floor.** Different from
+waiting for an element, which replay already does by retrying a selector until
+the step's timeout — anything that can be waited *for* is handled. This is for
+what cannot be: a framework re-rendering, a handler on the next tick, an
+animation finishing so a click lands where it looks like it will. None of those
+announce themselves, so the only honest answer is a pause. `stepDelay()` clamps
+in one place so every road in — the dashboard, `set_step_delay`, a hand-written
+workflow, a row written before the column existed — arrives at the same answer,
+and the runner takes it *between* steps only, never before the first or after
+the last.
 
 **Waiting is a poll, and adding an observer would be a regression.** Replay
 retries the selector list until the step's timeout. A MutationObserver has to be

@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS workflow (
   inputs      TEXT NOT NULL DEFAULT '[]',
   steps       TEXT NOT NULL DEFAULT '[]',
   produces    TEXT NOT NULL DEFAULT 'none',
+  -- How long to settle between steps. A second is the floor as well as the
+  -- default: a page that needs none is not harmed by one, and a page that
+  -- needs it gives no signal that anything could wait on.
+  step_delay_ms INTEGER NOT NULL DEFAULT 1000,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
   -- Scoped per project rather than globally: "the export workflow" is a name

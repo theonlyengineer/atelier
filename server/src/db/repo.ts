@@ -31,6 +31,21 @@ export interface Project {
   createdAt: string
 }
 
+/**
+ * How long a workflow settles between steps.
+ *
+ * A second is the floor as well as the default, and the clamp lives here so
+ * every road in — the dashboard, an MCP tool, a hand-written workflow, a row
+ * written before the column existed — arrives at the same answer. Anything
+ * below it is somebody asking for a race.
+ */
+export const MIN_STEP_DELAY_MS = 1000
+
+export const stepDelay = (value: unknown): number => {
+  const ms = Math.round(Number(value))
+  return Number.isFinite(ms) ? Math.max(MIN_STEP_DELAY_MS, ms) : MIN_STEP_DELAY_MS
+}
+
 const rowToProject = (r: Record<string, unknown>): Project => ({
   id: String(r.id),
   name: String(r.name),
@@ -243,6 +258,7 @@ function rowToWorkflow(r: Record<string, unknown>): Workflow {
     inputs: j<Workflow['inputs']>(r.inputs, []),
     steps: j<Workflow['steps']>(r.steps, []),
     produces: String(r.produces) as Workflow['produces'],
+    stepDelayMs: stepDelay(r.step_delay_ms),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   }
@@ -300,12 +316,13 @@ export function saveWorkflow(
   const at = nowIso()
   const id = w.id ?? randomUUID()
   db.prepare(
-    `INSERT INTO workflow (id, project_id, name, description, status, origins, profile_id, inputs, steps, produces, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO workflow (id, project_id, name, description, status, origins, profile_id, inputs, steps, produces, step_delay_ms, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        name = excluded.name, description = excluded.description, status = excluded.status,
        origins = excluded.origins, profile_id = excluded.profile_id, inputs = excluded.inputs,
-       steps = excluded.steps, produces = excluded.produces, updated_at = excluded.updated_at`,
+       steps = excluded.steps, produces = excluded.produces,
+       step_delay_ms = excluded.step_delay_ms, updated_at = excluded.updated_at`,
   ).run(
     id,
     // The project a workflow is saved into is decided once, when it is made.
@@ -320,6 +337,7 @@ export function saveWorkflow(
     JSON.stringify(w.inputs ?? []),
     JSON.stringify(w.steps ?? []),
     w.produces ?? 'none',
+    stepDelay(w.stepDelayMs ?? getWorkflow(id)?.stepDelayMs),
     at,
     at,
   )
@@ -676,6 +694,57 @@ export function setWorkflowDescription(id: string, description: string | null): 
   const wf = getWorkflow(id)
   if (!wf) throw new Error(`no workflow ${id}`)
   return saveWorkflow({ ...wf, description: (description ?? '').trim() })
+}
+
+/**
+ * Take one step out of a saved workflow.
+ *
+ * Deliberately not offered while recording, and the difference is the point:
+ * during a recording each step is performed against the page the previous one
+ * left behind, so a list you can edit in the middle stops describing anything
+ * that was actually done. A saved workflow is not that — it is an artifact
+ * being maintained, and the alternative to removing one stray step from it is
+ * re-recording twenty, which is the cost the repair path exists to avoid.
+ *
+ * Three things go with the step, because leaving any of them is a bug that
+ * shows up later and somewhere else.
+ */
+export function removeStep(workflowId: string, stepId: string): Workflow {
+  const wf = getWorkflow(workflowId)
+  if (!wf) throw new Error(`no workflow ${workflowId}`)
+  const going = wf.steps.find((s) => s.id === stepId)
+  if (!going) throw new Error(`workflow "${wf.name}" has no step ${stepId}`)
+  if (wf.steps.length === 1) {
+    throw new Error('a workflow needs at least one step — delete the workflow instead')
+  }
+
+  const steps = wf.steps.filter((s) => s.id !== stepId)
+
+  // A wait that was waiting for the thing just removed would sit out its whole
+  // timeout — three minutes, for a capture — waiting for something nobody is
+  // going to take. Only an exact match is cleared: a step waiting for
+  // something else that happens to be nearby is still waiting for it.
+  const same = JSON.stringify(going.selectors ?? [])
+  for (const step of steps) {
+    if (step.waitAfter && 'selectors' in step.waitAfter) {
+      if (JSON.stringify(step.waitAfter.selectors ?? []) === same) delete step.waitAfter
+    }
+  }
+
+  // What it matched on last time says nothing about anything now.
+  clearStepMatch(workflowId, stepId)
+
+  // And the workflow's signature follows its steps, so removing the one that
+  // asked for a value stops the agent being asked for it.
+  return saveWorkflow({ ...wf, steps, inputs: inputsFrom(steps) })
+}
+
+/** Change how long a workflow settles between steps. Clamped, so the floor
+ *  cannot be argued past from any direction. */
+export function setStepDelay(id: string, ms: unknown): Workflow {
+  const wf = getWorkflow(id)
+  if (!wf) throw new Error(`no workflow ${id}`)
+  return saveWorkflow({ ...wf, stepDelayMs: stepDelay(ms) })
 }
 
 export function setWorkflowStatus(id: string, status: WorkflowStatus): Workflow {

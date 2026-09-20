@@ -178,6 +178,7 @@ export async function startDaemon(port = DEFAULT_PORT): Promise<{ port: number; 
         origins: w.origins,
         steps: w.steps.length,
         inputs: w.inputs,
+        stepDelayMs: w.stepDelayMs,
         // The whole step, not a summary of it. The dashboard's workflow page
         // shows each step's target, action and value and lets the value be
         // edited, and the popup needs enough to offer a repair — one shape that

@@ -139,11 +139,16 @@ written down, so "Same text", "SAME Text" and "same_text" are one name — the
 agent passes one value per name, and two fields sharing one would both get it.
 Atelier says so when you add the step, while renaming is still free.
 
-**Steps cannot be removed one at a time, and an action cannot be changed.** Only
-a value can. A step list you can edit in the middle stops describing anything
-that was actually performed, and that it describes exactly what was performed is
-the whole value of the thing. **Start over** is the escape hatch and says what
-it costs.
+**While recording, steps cannot be removed one at a time, and an action can
+never be changed.** A step list you can edit in the middle stops describing
+anything that was actually performed, and that it describes exactly what was
+performed is the whole value of the thing. **Start over** is the escape hatch
+and says what it costs.
+
+Once a workflow is *saved*, a step that should not be there **can** be removed
+from its page on the dashboard — a stray click, a wait the site no longer needs.
+The alternative would be re-recording the other nineteen. What a step does still
+cannot be changed anywhere: a step nobody performed is a step nobody checked.
 
 **Passwords are never recorded** — not the value, and not as part of a selector.
 A password field offers exactly one action: park the job and hand you the
@@ -160,6 +165,13 @@ and waiting handles both.
 
 Ordinary steps get 30 seconds. A capture gets three minutes, because generating
 something is the slow thing this tool exists for.
+
+**And a workflow pauses between steps** — one second by default, and one second
+is also the minimum. That is a different thing from waiting for an element:
+anything that can be waited *for* is already covered above. The pause is for
+what cannot be — a framework re-rendering, a handler running on the next tick,
+an animation finishing so a click lands where it looks like it will. Raise it on
+a workflow's own page for a site that is visibly slower to settle.
 
 ## When a workflow starts to rot
 
@@ -253,6 +265,8 @@ run_workflow  name, inputs     → replay it, wait, return the asset
 test_workflow name             → replay it with the values it was recorded with
 set_workflow_status name, s    → disable one without losing it, or enable it again
 set_step_value name, stepId    → move one value between "always this" and "the agent supplies it"
+remove_step   name, stepId     → take one step out of a saved workflow
+set_step_delay name, seconds   → how long it settles between steps (one second minimum)
 describe_workflow name, text   → say what a workflow is for, once you know
 workflow_health [name]         → what each step is matching on now vs. as recorded
 repair_step   name, stepId     → fix where one step looks, without touching the rest

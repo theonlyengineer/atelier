@@ -84,10 +84,23 @@ cannot be performed is refused while somebody is still looking at the page.
 There is no separate "recording" code path to drift from the replaying one,
 because there is no separate code path.
 
-**A recorded step cannot be removed or re-actioned.** Only its value can change.
-A step list you can edit in the middle stops describing anything that was
-actually performed, and that it describes exactly what was performed is the
-whole value of it. Start over is the escape hatch.
+**A step being recorded cannot be removed, and no step anywhere can be
+re-actioned.** A list you can edit in the middle of a recording stops describing
+anything that was actually performed, and that it describes exactly what was
+performed is the whole value of it. Start over is the escape hatch. The
+prohibition on *removal* ends when the recording is saved: a workflow on the
+dashboard is an artifact being maintained, and dropping a stray click from it
+beats re-recording the other nineteen. `repo.removeStep` therefore exists and
+`repo.setStepKind` does not, because a step nobody performed is a step nobody
+checked.
+
+Removal is three edits, not one, and the other two are the ones that bite
+later: the step's row in `step_health` goes, because what it matched on says
+nothing about anything now; a `waitAfter` elsewhere whose selectors are exactly
+the removed step's goes with it, or a capture's three-minute wait sits out its
+whole timeout waiting for something nobody will take; and `inputs` is rebuilt
+from the remaining steps by `inputsFrom`, so a removed dynamic step stops the
+agent being asked for a value nothing types.
 
 ## Staying on top of the page
 
@@ -195,6 +208,23 @@ both without knowing which it is in.
 So the only knob is patience, set per step when the workflow is saved: 30
 seconds for an ordinary step, three minutes for a capture, three minutes for an
 explicit wait.
+
+### The pause between steps
+
+Separate from all of the above, and for the residue it cannot reach. Waiting
+covers anything that can be waited *for* — an element appearing, one going away,
+a URL changing. What it cannot cover is a page that is *there* but not yet
+ready: a framework mid-re-render, a handler queued for the next tick, an
+animation still moving the thing about to be clicked. None of those have an
+observable end state to name, so the runner simply pauses.
+
+`Workflow.stepDelayMs`, a second by default and a second as the floor —
+`repo.stepDelay()` clamps, and every road in goes through it, so a hand-written
+workflow, a row written before the column existed and `set_step_delay` all reach
+the same answer. `Runner.settle()` applies it *between* steps only: never before
+the first, and never after the last, where it would be a second added to every
+run for nothing. The wait is injectable (`RunnerDeps.wait`) so the tests assert
+the pause happens without spending real seconds on it.
 
 ## What a workflow is for
 
