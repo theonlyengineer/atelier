@@ -317,21 +317,100 @@ test('a workflow name is readable in the overview, not squeezed to one letter', 
   await page.close()
 })
 
-test('the dashboard is light even when the operating system is dark', skip, async () => {
-  // A dark variant was invented that the house style does not have, so anyone
-  // with a dark OS — most people — got a dashboard that looked nothing like the
-  // thing it is supposed to match. Light is the whole theme; this is the test
-  // that stops it drifting back.
-  const page = await browser.newPage()
-  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }])
-  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' })
+test('the dashboard is dark by default, whatever the operating system says', skip, async () => {
+  // Dark is the default because this page sits open beside an editor all day.
+  // It is not "follow the OS": an unset preference is a preference for dark, and
+  // a light OS must not drag the page back.
+  for (const os of ['dark', 'light'] as const) {
+    const page = await browser.newPage()
+    await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: os }])
+    await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(`document.querySelectorAll('.kpi').length > 0`, { timeout: 8000 })
+    assert.equal(
+      await page.evaluate(`getComputedStyle(document.body).backgroundColor`),
+      'rgb(20, 18, 15)',
+      `the dark paper, with the OS set to ${os}`,
+    )
+    await page.close()
+  }
+})
+
+test('the switch changes the theme and says what pressing it will do', skip, async () => {
+  const page = await open()
+  assert.equal(await page.evaluate(`document.getElementById('theme').textContent`), 'Switch to light')
+
+  await page.evaluate(`document.getElementById('theme').click()`)
+  assert.equal(
+    await page.evaluate(`getComputedStyle(document.body).backgroundColor`),
+    'rgb(255, 251, 245)',
+    'the house paper is still there, one click away',
+  )
+  assert.equal(await page.evaluate(`document.getElementById('theme').textContent`), 'Switch to dark')
+
+  await page.evaluate(`document.getElementById('theme').click()`)
+  assert.equal(await page.evaluate(`getComputedStyle(document.body).backgroundColor`), 'rgb(20, 18, 15)')
+  await page.close()
+})
+
+test('the choice is remembered, and applied before the page paints', skip, async () => {
+  // Reading it after first paint means every reload flashes the wrong theme,
+  // which is the whole reason the head script exists.
+  const page = await open()
+  await page.evaluate(`document.getElementById('theme').click()`)
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  assert.equal(
+    await page.evaluate(`document.documentElement.dataset.theme`),
+    'light',
+    'the attribute is set by the head script, before any stylesheet applies',
+  )
   await page.waitForFunction(`document.querySelectorAll('.kpi').length > 0`, { timeout: 8000 })
+  assert.equal(await page.evaluate(`getComputedStyle(document.body).backgroundColor`), 'rgb(255, 251, 245)')
+  // Put it back: pages in this suite share an origin, so a remembered choice is
+  // shared state that would quietly decide the theme for every test after this
+  // one — which is exactly what it did.
+  await page.evaluate(`localStorage.removeItem('atelier:theme')`)
+  await page.close()
+})
 
-  const bg = await page.evaluate(`getComputedStyle(document.body).backgroundColor`)
-  assert.equal(bg, 'rgb(255, 251, 245)', 'the paper colour, regardless of the OS setting')
+test('no tile inverts into a white slab in the dark theme', skip, async () => {
+  // The third KPI tile is a deliberate inverted tile in the light theme. Carried
+  // over literally it became a near-white card on a near-black page, which reads
+  // as a rendering fault rather than as emphasis.
+  const page = await open()
+  const tiles = (await page.evaluate(`
+    document.documentElement.dataset.theme = 'dark'
+    ;[...document.querySelectorAll('.kpi')].map((el) => getComputedStyle(el).backgroundColor)
+  `)) as string[]
+  for (const bg of tiles) {
+    const [r, g, b] = bg.match(/\d+/g)!.map(Number)
+    assert.ok(r! + g! + b! < 300, `a tile is ${bg} in the dark theme`)
+  }
+  await page.close()
+})
 
-  const ink = await page.evaluate(`getComputedStyle(document.body).color`)
-  assert.equal(ink, 'rgb(0, 0, 0)', 'ink stays ink')
+test('both themes keep readable contrast on the text that carries the status', skip, async () => {
+  const luminance = (rgb: string) => {
+    const [r, g, b] = rgb.match(/\d+/g)!.map((n) => {
+      const c = Number(n) / 255
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+    })
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!
+  }
+  const page = await open()
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate(`document.documentElement.dataset.theme = '${theme}'`)
+    // An IIFE, because page.evaluate runs each string in the same global scope
+    // and a bare `const` on the second pass through this loop is a redeclaration.
+    const [fg, bg] = (await page.evaluate(`
+      (() => {
+        const el = document.getElementById('sidestat-text')
+        return [getComputedStyle(el).color, getComputedStyle(document.body).backgroundColor]
+      })()
+    `)) as [string, string]
+    const [a, b] = [luminance(fg), luminance(bg)].sort((x, y) => y - x)
+    const ratio = (a! + 0.05) / (b! + 0.05)
+    assert.ok(ratio > 3, `${theme}: status text is ${ratio.toFixed(1)}:1 against the page`)
+  }
   await page.close()
 })
 
@@ -624,5 +703,39 @@ test('a project can be created from the page', skip, async () => {
 
   assert.ok(repo.listProjects().some((p) => p.name === name), 'it exists')
   assert.notEqual(repo.activeProject().name, name, 'and creating did not silently move you into it')
+  await page.close()
+})
+
+/* -------------------------------------------------------------- connect */
+
+test('the Connect tab shows a config an agent can actually be pointed at', skip, async () => {
+  const page = await open()
+  await page.evaluate(`document.querySelector('[data-tab="connect"]').click()`)
+  await page.waitForFunction(`document.getElementById('mcp-json').textContent.includes('mcpServers')`, {
+    timeout: 8000,
+  })
+  const shown = JSON.parse(await page.evaluate(`document.getElementById('mcp-json').textContent`))
+  assert.equal(shown.mcpServers.atelier.type, 'http')
+  assert.match(shown.mcpServers.atelier.url, new RegExp(`127\\.0\\.0\\.1:${PORT}/mcp$`))
+  assert.match(shown.mcpServers.atelier.headers.Authorization, /^Bearer \S+/)
+  await page.close()
+})
+
+test('the token is not in the page source, only in what Connect fetches', skip, async () => {
+  // A dashboard left open in a tab should not have the credential sitting in
+  // its HTML, where anything that can read the document can read it.
+  const page = await open()
+  const html = await page.evaluate(`document.documentElement.outerHTML`)
+  assert.equal(String(html).includes('Bearer '), false)
+  await page.close()
+})
+
+test('Download hands over a file rather than navigating the dashboard away', skip, async () => {
+  const page = await open()
+  await page.evaluate(`document.querySelector('[data-tab="connect"]').click()`)
+  const attr = await page.evaluate(
+    `document.getElementById('mcp-download').getAttribute('download')`,
+  )
+  assert.equal(attr, '.mcp.json')
   await page.close()
 })

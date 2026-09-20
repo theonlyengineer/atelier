@@ -2,7 +2,7 @@
  * The dashboard at http://127.0.0.1:7717 — the answer to "is it working, what
  * can it do, and does anything need me?"
  *
- * Deliberately not the same thing as the extension side panel. The panel is the
+ * Deliberately not the same thing as the extension popup. The popup is the
  * *action* surface: the one or two things that need a human, in the browser
  * where they would act. This is the *observation* surface.
  *
@@ -32,6 +32,15 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Atelier</title>
+<script>
+  /* Before first paint, or a remembered light choice flashes dark on every
+     reload. Wrapped because storage throws outright in some privacy modes, and
+     a dashboard that will not render is worse than one in the wrong colours. */
+  try {
+    var t = localStorage.getItem('atelier:theme')
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t
+  } catch (e) {}
+</script>
 <!--
   The two house faces. Deliberately the only thing on this page that reaches the
   network, and it is a real trade: the daemon's whole posture is that nothing
@@ -60,7 +69,49 @@ export const dashboardHtml = (version: string) => `<!doctype html>
    * and it is still spent sparingly: a wall of successes reads at low opacity,
    * because the thing you are scanning for is the one that failed.
    */
+  /*
+   * Dark is the default, light is a switch in the sidebar, and the choice is
+   * remembered. The palette below is the dark one; the light values that used to
+   * live here are further down under [data-theme="light"].
+   *
+   * Both are the same paper. The house ground is a warm off-white, so the dark
+   * ground is a warm near-black rather than a blue-grey, and every accent is the
+   * same hue lifted until it holds its contrast against it. A dark mode built
+   * from a different palette stops being the same product with the lights off.
+   */
   :root{
+    --page:#14120F;        /* the house paper, in the dark */
+    --panel:#1C1916;
+    --sunk:#211D19;
+    --ink:#F7F2EA;
+    --dim:rgb(247 242 234/72%);
+    --faint:rgb(247 242 234/46%);
+    --line:rgb(247 242 234/16%);
+    --line-2:rgb(247 242 234/9%);
+    --accent:#FF6552;      /* lifted off the house red, which goes muddy here */
+    --accent-soft:#3B1B16;
+    --ok:#6BC992;
+    --ok-soft:#17301F;
+    --warn:#E0A64C;
+    --warn-soft:#332616;
+    --bad:#FF6552;
+    --bad-soft:#3B1B16;
+    --k1:#211D19;
+    --k1-ink:#F7F2EA;
+    --k2:#17301F;
+    --k2-ink:#8FDDB0;
+    --k3:#2E2822;          /* lifted, not inverted: three tones of one dark
+                              paper. Inverting the light theme's black tile
+                              would put a white slab on a dark page. */
+    --k3-ink:#F7F2EA;
+    --on-tile-soft:rgb(255 255 255/11%);
+    --on-tile-cta:rgb(255 255 255/10%);
+    --r:10px; --r-sm:7px;
+    --serif:"Source Serif 4",ui-serif,Georgia,"Times New Roman",serif;
+    --sans:"Poppins",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  :root[data-theme="light"]{
     --page:#FFFBF5;        /* warm paper — the house ground */
     --panel:#FFFFFF;
     --sunk:#F8F4EC;        /* the house secondary surface */
@@ -83,19 +134,24 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     --k2-ink:#1C5A38;
     --k3:#111111;
     --k3-ink:#FFFBF5;
+    --on-tile-soft:rgb(0 0 0/8%);
+    --on-tile-cta:rgb(255 255 255/80%);
     --r:10px; --r-sm:7px;
     --serif:"Source Serif 4",ui-serif,Georgia,"Times New Roman",serif;
     --sans:"Poppins",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
   /*
-   * Light only, on purpose. The house style has no dark mode, and inventing one
-   * means the dashboard stops matching the thing it is meant to match for
-   * everyone whose OS is set to dark — which is most people, which is how this
-   * shipped looking nothing like its own reference. If a dark variant is ever
-   * wanted it is a decision to take deliberately, not a default to assume.
+   * This used to say "light only, on purpose" and that a dark variant would be a
+   * decision to take deliberately rather than a default to assume. It was taken
+   * (2026-09-19): dark is the default and light is a switch, because this is a
+   * status page that sits open beside an editor all day.
+   *
+   * color-scheme follows the attribute so form controls, scrollbars and the
+   * caret come from the right set without any of them being restyled by hand.
    */
-  :root{color-scheme:light}
+  :root{color-scheme:dark}
+  :root[data-theme="light"]{color-scheme:light}
   *{box-sizing:border-box}
   [hidden]{display:none!important}
   html,body{height:100%}
@@ -172,6 +228,12 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   @keyframes breathe{0%,100%{opacity:1}50%{opacity:.3}}
   .sidestat p{margin:7px 0 0;font-size:11px;color:var(--faint);font-family:var(--mono);line-height:1.6;
     white-space:pre-line;word-break:break-word}
+  /* Under the status, because this is the other thing in the chrome that is
+     about the page rather than about the work. */
+  .theme{all:unset;cursor:pointer;display:block;margin-top:10px;font-size:11px;
+    color:var(--faint);text-decoration:underline;text-underline-offset:2px}
+  .theme:hover{color:var(--ink)}
+  .theme:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:5px}
 
   /* ----------------------------------------------------------- main --- */
   .main{padding:24px 28px 64px;min-width:0}
@@ -192,6 +254,20 @@ export const dashboardHtml = (version: string) => `<!doctype html>
 
   /* A surface is drawn with a rule, not a shadow — the house way. */
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r)}
+
+  /* Connect: a page you read once, so it is prose and two buttons rather than
+     a dense panel. */
+  .connect{padding:20px 22px;max-width:760px}
+  .connect h2{margin:0 0 8px;font-size:15px}
+  .connect p{margin:0 0 14px;font-size:12.5px;line-height:1.65;color:var(--dim)}
+  .connect code{background:var(--sunk);padding:1px 5px;border-radius:5px}
+  .connect pre{background:var(--sunk);border:1px solid var(--line);border-radius:10px;
+    padding:13px 15px;font-size:11.5px;line-height:1.6;overflow:auto;margin:0;
+    font-family:var(--mono)}
+  .connect-actions{display:flex;align-items:center;gap:10px;margin:14px 0 0}
+  .connect-actions #mcp-said{font-size:11.5px;color:var(--ok)}
+  .connect-warn{margin:16px 0 0!important;padding:11px 13px;border-radius:9px;
+    background:var(--warn-soft);color:var(--warn)}
   .pad{padding:18px 20px}
 
   /* ------------------------------------------------------------ kpi --- */
@@ -207,13 +283,13 @@ export const dashboardHtml = (version: string) => `<!doctype html>
   .kpi .big{font-size:38px;font-weight:700;letter-spacing:-.03em;line-height:1.1;margin-top:10px;
     font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:9px}
   .kpi .chip{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;
-    background:rgb(0 0 0/8%);font-family:var(--sans)}
-  .kpi.k3 .chip{background:rgb(255 255 255/14%)}
+    background:var(--on-tile-soft);font-family:var(--sans)}
+  :root[data-theme="light"] .kpi.k3 .chip{background:rgb(255 255 255/14%)}
   .kpi .sub{font-size:12px;opacity:.78;margin-top:2px}
   .kpi .go{all:unset;cursor:pointer;margin-top:14px;align-self:flex-start;font-size:12px;
-    font-weight:600;background:rgb(255 255 255/80%);padding:7px 14px;border-radius:99px;
+    font-weight:600;background:var(--on-tile-cta);padding:7px 14px;border-radius:99px;
     display:flex;align-items:center;gap:6px;color:inherit}
-  .kpi.k3 .go{background:rgb(255 255 255/13%)}
+  :root[data-theme="light"] .kpi.k3 .go{background:rgb(255 255 255/13%)}
   .kpi .go:hover{filter:brightness(1.05)}
 
   /* ---------------------------------------------------------- charts --- */
@@ -416,6 +492,10 @@ export const dashboardHtml = (version: string) => `<!doctype html>
         <svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.2l1.8 2.2h8A2.5 2.5 0 0 1 21 9.7v7.8A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>
         Projects
       </button>
+      <button role="tab" id="tab-connect" data-tab="connect" aria-controls="panel-connect">
+        <svg viewBox="0 0 24 24"><path d="M9 17H7a5 5 0 0 1 0-10h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8"/></svg>
+        Connect
+      </button>
       <button role="tab" id="tab-log" data-tab="log" aria-controls="panel-log">
         <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8.5 9h7M8.5 13h7M8.5 17h4"/></svg>
         Log
@@ -425,6 +505,7 @@ export const dashboardHtml = (version: string) => `<!doctype html>
     <div class="sidestat" id="sidestat">
       <div class="dotline"><i></i><span id="sidestat-text">connecting</span></div>
       <p id="sidestat-sub"></p>
+      <button id="theme" class="theme" type="button">Switch to light</button>
     </div>
   </aside>
 
@@ -513,6 +594,27 @@ export const dashboardHtml = (version: string) => `<!doctype html>
       <div id="projects"></div>
     </div>
 
+    <div role="tabpanel" id="panel-connect" aria-labelledby="tab-connect" hidden>
+      <section class="card connect">
+        <h2>Point an agent at this daemon</h2>
+        <p>
+          Save this as <code>.mcp.json</code> beside a project and Claude Code will use these
+          tools without a copy of Atelier on that machine. It reaches the daemon over HTTP, so
+          there is nothing to spawn and nothing to build.
+        </p>
+        <pre id="mcp-json">…</pre>
+        <div class="connect-actions">
+          <button class="btn" id="mcp-copy">Copy</button>
+          <a class="btn" id="mcp-download" href="/mcp.json" download=".mcp.json">Download</a>
+          <span id="mcp-said"></span>
+        </div>
+        <p class="connect-warn">
+          The token in this file is the key to everything the daemon can do to a browser.
+          Treat it the way you would treat a password — it does not belong in a repo.
+        </p>
+      </section>
+    </div>
+
     <div role="tabpanel" id="panel-log" aria-labelledby="tab-log" hidden>
       <pre class="log" id="log">…</pre>
       <p class="paths" id="paths"></p>
@@ -570,13 +672,14 @@ const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.round(n /
 
 /* -------------------------------------------------------------- tabs --- */
 
-const TABS = ['overview', 'workflows', 'runs', 'assets', 'projects', 'log']
+const TABS = ['overview', 'workflows', 'runs', 'assets', 'projects', 'connect', 'log']
 const TITLES = {
   overview: ['Overview', 'A little of everything, so the first screen answers the question'],
   workflows: ['Workflows', 'What this machine can do, and whether it still can'],
   runs: ['Runs', 'What has run, and how it went'],
   assets: ['Assets', 'What the workflows produced'],
   projects: ['Projects', 'Separate bodies of work — workflows, runs and assets belong to exactly one'],
+  connect: ['Connect', 'Point an agent at this daemon — the config, and the token in it'],
   log: ['Log', 'The daemon, verbatim'],
 }
 
@@ -586,7 +689,17 @@ const TITLES = {
 let currentTab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview'
 let latest = null
 
+/* The .mcp.json is fetched rather than rendered into the page, so the token is
+   not sitting in the HTML of every tab the dashboard is left open in. Declared
+   up here with the other page state because applyTab() reads it, and applyTab
+   runs before the connect block further down would have initialised it. */
+let mcpText = null
+
 function applyTab() {
+  // Only when the reader asks for it: the config carries a credential and there
+  // is no reason to fetch one to render a tab nobody opened.
+  if (currentTab === 'connect') loadMcpConfig()
+
   for (const t of TABS) {
     const tab = $('tab-' + t), panel = $('panel-' + t)
     if (!tab || !panel) continue
@@ -723,7 +836,7 @@ function workflowCard(w) {
   else if (health.state === 'fragile' || health.state === 'degraded') {
     const worst = (health.degraded || [])[0]
     note = '<div class="note ' + (health.state === 'fragile' ? 'bad' : 'warn') + '">' +
-      esc(health.summary) + (worst ? '<br>' + esc(worst.note) + ' — re-record that step from the side panel.' : '') + '</div>'
+      esc(health.summary) + (worst ? '<br>' + esc(worst.note) + ' — re-record that step from the Atelier popup.' : '') + '</div>'
   }
 
   return '<article class="wf ' + tone + '"><div class="wf-top">' +
@@ -775,7 +888,7 @@ function render(d) {
     cards.push('<div class="wf fragile" style="margin-bottom:14px"><div class="wf-top">' +
       '<span class="wf-name">' + esc(j.workflowName) + '</span>' +
       '<span class="tag bad">paused</span></div>' +
-      '<p class="wf-desc">' + esc(j.blockedReason || 'Paused.') + ' Resume it from the Atelier side panel.</p></div>')
+      '<p class="wf-desc">' + esc(j.blockedReason || 'Paused.') + ' Resume it from the Atelier popup.</p></div>')
   }
   if (!attached) {
     cards.push('<div class="wf" style="margin-bottom:14px;border-color:var(--warn)"><div class="wf-top">' +
@@ -989,6 +1102,56 @@ $('v-delete').onclick = async () => {
   }
 }
 $('v-open').onclick = () => { if (openAsset) window.open('/asset/' + openAsset, '_blank') }
+
+/* ------------------------------------------------------------- theme --- */
+
+/* The attribute is already set by the head script when a choice was remembered;
+   absent means dark, which is the default rather than a stored value. */
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme
+  /* The button says what pressing it does, not what is currently on. A switch
+     labelled with the state it is already in is the oldest confusing control
+     there is. */
+  $('theme').textContent = theme === 'dark' ? 'Switch to light' : 'Switch to dark'
+  try { localStorage.setItem('atelier:theme', theme) } catch (e) {}
+}
+
+$('theme').onclick = () => applyTheme(currentTheme() === 'dark' ? 'light' : 'dark')
+applyTheme(currentTheme())
+
+/* ----------------------------------------------------------- connect --- */
+
+async function loadMcpConfig() {
+  if (mcpText !== null) return
+  try {
+    const res = await fetch('/mcp.json')
+    mcpText = JSON.stringify(await res.json(), null, 2)
+  } catch {
+    mcpText = 'Could not read the config — is the daemon still running?'
+  }
+  $('mcp-json').textContent = mcpText
+}
+
+$('mcp-copy').onclick = async () => {
+  await loadMcpConfig()
+  try {
+    await navigator.clipboard.writeText(mcpText)
+    said('Copied')
+  } catch {
+    /* A denied clipboard is not an error worth a dialog: the text is on screen
+       and Download is right there. */
+    said('Select the text above, or use Download')
+  }
+}
+
+function said(message) {
+  $('mcp-said').textContent = message
+  setTimeout(() => { $('mcp-said').textContent = '' }, 2500)
+}
 $('v-save').onclick = async () => {
   if (!openAsset) return
   $('v-save').disabled = true
