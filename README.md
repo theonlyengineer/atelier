@@ -41,6 +41,11 @@ start`. Same daemon, same everything.)*
 The extension finds the daemon on localhost by itself. There is nothing to paste
 and no settings page.
 
+It asks for **local network access**, which recent Chrome requires before
+anything may reach `127.0.0.1` — without it the popup can see nothing and its
+buttons do nothing. If you are on a Chrome old enough not to know that
+permission it is ignored with a warning, and everything still works.
+
 It asks for **no site access at install time.** Permission is requested for one
 origin at a time, at the moment you start recording on it — so the guarantee
 that Atelier can only touch the sites you recorded on is enforced by the
@@ -207,6 +212,10 @@ than it gives. The **dashboard** is where everything is, with detail.
 
 If the page will not load at all, the daemon is not running — `docker compose up
 -d`, or check `~/.atelier/atelierd.log`.
+
+**After updating Atelier, reload the extension** at `chrome://extensions`. A
+manifest change — a new permission, for instance — does not take effect until
+you do.
 
 ## Projects
 

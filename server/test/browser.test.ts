@@ -715,28 +715,42 @@ const PANEL_CSS = readFileSync(join(PANEL_DIR, 'panel.css'), 'utf-8')
  * needs tabs, so both are replaced and what is asserted is what gets rendered
  * and what gets dispatched.
  */
-async function popupWith(workflows: unknown[], origin = 'https://example.test') {
+async function popupWith(
+  workflows: unknown[],
+  origin = 'https://example.test',
+  /** Refuse every request the popup makes for itself, the way a browser that
+   *  gates the loopback address space per document does. */
+  opts: { blockDirectFetch?: boolean } = {},
+) {
   const page = await browser.newPage()
   await page.setContent(PANEL_HTML.replace(/<script[\s\S]*?<\/script>/, ''))
   await page.addStyleTag({ content: PANEL_CSS })
   await page.evaluate(`
     window.__sent = []
+    window.__blocked = ${opts.blockDirectFetch ? 'true' : 'false'}
+    const answer = (path) => path.indexOf('/health') >= 0
+      ? { ok: true }
+      : { ok: true, result: { port: 7717, jobs: [], browsers: [{ label: 'chrome' }],
+                              workflows: ${JSON.stringify(workflows)} } }
     window.chrome = {
       runtime: {
         id: 'x',
-        sendMessage: (msg) => { window.__sent.push(msg); return Promise.resolve({ recording: null, state: {} }) },
+        sendMessage: (msg) => {
+          window.__sent.push(msg)
+          // The worker's road is the one that still works.
+          if (msg.t === 'panel.daemon') return Promise.resolve({ ok: true, result: answer(msg.path).result })
+          return Promise.resolve({ recording: null, state: {} })
+        },
         onMessage: { addListener: () => {} },
       },
       tabs: { query: async () => [{ id: 1, url: ${JSON.stringify(origin)} + '/somewhere' }], create: () => {} },
       permissions: { contains: async () => true, request: async () => true },
     }
     window.close = () => { window.__closed = true }
-    window.fetch = async (url) => ({
-      ok: true,
-      json: async () => url.indexOf('/health') >= 0
-        ? { ok: true }
-        : { ok: true, result: { jobs: [], browsers: [{ label: 'chrome' }], workflows: ${JSON.stringify(workflows)} } },
-    })
+    window.fetch = async (url) => {
+      if (window.__blocked) throw new TypeError('Failed to fetch')
+      return { ok: true, json: async () => answer(String(url)) }
+    }
   `)
   await page.evaluate(PANEL_JS)
   await page.waitForFunction(`document.querySelectorAll('#here li, #here-empty:not([hidden])').length > 0`)
@@ -1252,4 +1266,78 @@ test('pointing at a wrapper offers the actions of the control inside it', skip, 
   assert.equal(ids[0], 'type')
   assert.ok(ids.includes('clear'))
   await page.close()
+})
+
+/* ------------------------------------------- when the popup cannot reach out */
+
+/**
+ * Chrome gates requests to the loopback address space per *document*.
+ *
+ * Every fetch the popup made for itself was refused — "Permission was denied
+ * for this request to access the `loopback` address space" — while the service
+ * worker's went through untouched. So recording kept working and every button
+ * in the popup quietly did nothing, which is the worst shape a failure can
+ * take: no error, no banner, nothing to act on.
+ *
+ * The manifest asks for `localNetworkAccess`, which is the proper fix. This is
+ * what makes the popup work on a browser that refuses anyway.
+ *
+ * These tests exist because the ones above could not have caught it: they stub
+ * `fetch` with something that always succeeds, so a popup whose every request
+ * is refused looks identical to one that is working.
+ */
+
+test('the popup still lists its workflows when its own requests are refused', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])], 'https://example.test', {
+    blockDirectFetch: true,
+  })
+  const listed = await page.evaluate(`[...document.querySelectorAll('#here .wf-name')].map(e => e.textContent)`)
+  assert.deepEqual(listed, ['generate-image'])
+  assert.equal(await page.evaluate(`document.getElementById('offline').hidden`), true, 'not offline')
+  // And it got there the only way left open to it.
+  const asked = (await page.evaluate(`window.__sent.filter(m => m.t === 'panel.daemon').map(m => m.path)`)) as string[]
+  assert.ok(asked.includes('/api/overview'))
+  await page.close()
+})
+
+test('and its buttons still do what they say', skip, async () => {
+  const page = await popupWith([wf('generate-image', ['https://example.test'])], 'https://example.test', {
+    blockDirectFetch: true,
+  })
+  await page.evaluate(`window.__sent.length = 0`)
+  await page.evaluate(`[...document.querySelectorAll('#here button')].find(b => b.textContent === 'Test run').click()`)
+  await page.waitForFunction(`window.__sent.some(m => m.t === 'panel.daemon' && m.path === '/api/workflows.test')`)
+  await page.close()
+})
+
+test('a refusal from the daemon is an answer, not a reason to ask again elsewhere', skip, async () => {
+  // Falling back on a real error would hide it, and ask a second time for
+  // something already decided.
+  const page = await popupWith([wf('generate-image', ['https://example.test'])])
+  await page.evaluate(`
+    window.__sent.length = 0
+    window.fetch = async () => ({ ok: true, json: async () => ({ ok: false, error: 'it is disabled' }) })
+  `)
+  await page.evaluate(`[...document.querySelectorAll('#here button')].find(b => b.textContent === 'Test run').click()`)
+  await page.waitForFunction(`!document.getElementById('modal').hidden`)
+  assert.match(
+    (await page.evaluate(`document.getElementById('modal-body').textContent`)) as string,
+    /it is disabled/,
+  )
+  assert.equal(
+    await page.evaluate(`window.__sent.filter(m => m.t === 'panel.daemon').length`),
+    0,
+    'the worker was never asked to try the same thing again',
+  )
+  await page.close()
+})
+
+test('the manifest asks for the permission that makes the direct road work', skip, async () => {
+  const manifest = JSON.parse(
+    readFileSync(join(HERE, '..', '..', 'extension', 'manifest.json'), 'utf-8'),
+  )
+  assert.ok(
+    manifest.permissions.includes('localNetworkAccess'),
+    'without it a modern browser refuses every request this popup makes',
+  )
 })

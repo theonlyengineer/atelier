@@ -42,6 +42,8 @@ let recording = null
 /** The origin of the tab the popup was opened over. The filter this whole
  *  screen is built around. */
 let here = null
+/** The port the daemon last reported being on, for when we could not probe. */
+let lastPort = null
 
 /* --------------------------------------------------------------- dialog */
 
@@ -388,24 +390,43 @@ els.retry.onclick = async () => {
 }
 
 function openDashboard(hash) {
-  if (!daemonPort) return
-  chrome.tabs.create({ url: `http://127.0.0.1:${daemonPort}/${hash ?? ''}` })
+  // Whatever the overview last said, when the popup could not find the port
+  // itself. A link that silently does nothing is worse than a wrong port.
+  const port = daemonPort ?? lastPort
+  if (!port) return
+  chrome.tabs.create({ url: `http://127.0.0.1:${port}/${hash ?? ''}` })
 }
 
 /* ----------------------------------------------------------- the daemon */
 
 /**
- * The popup talks to the daemon directly.
+ * The popup asks the daemon directly, and asks the worker when it cannot.
  *
- * It used to ask the service worker, which meant a sleeping or wedged worker
- * made the popup claim the daemon was down — and an MV3 listener that returns
- * `true` without calling sendResponse hangs the caller forever, with no error
- * anywhere. The popup is an extension page with host permissions for
- * 127.0.0.1, so it can just ask. The worker is still needed to *drive* a
- * browser; it is not needed to *describe* one.
+ * Directly first, because that is the honest way round: the popup is an
+ * extension page with host permissions for 127.0.0.1, and routing its reads
+ * through the service worker used to mean a sleeping or wedged worker made the
+ * popup claim the daemon was down — an MV3 listener that returns `true`
+ * without calling sendResponse hangs the caller forever, with no error
+ * anywhere. The worker is needed to *drive* a browser; it is not needed to
+ * *describe* one.
+ *
+ * The fallback is not defensiveness. Chrome now gates requests to the loopback
+ * address space behind Local Network Access, and it gates them per *document*:
+ * every fetch from this page was refused — "Permission was denied for this
+ * request to access the `loopback` address space" — while the service worker's
+ * went through untouched, which is why recording kept working and every button
+ * in here quietly did nothing. The manifest asks for `localNetworkAccess`,
+ * which is the proper fix; this is what makes the popup work on a browser that
+ * refuses anyway, and it costs one message hop on a path that was already
+ * failing.
+ *
+ * Only a *transport* failure falls back. An error the daemon itself returned is
+ * an answer, and asking a second time down a different road would not change it.
  */
 const PORTS = [7717, 7718, 7719, 7720]
 let daemonPort = null
+/** Set once the direct road is known not to work, for this popup's lifetime. */
+let throughWorker = false
 
 async function findDaemon() {
   const candidates = daemonPort ? [daemonPort, ...PORTS] : PORTS
@@ -422,7 +443,7 @@ async function findDaemon() {
   return null
 }
 
-async function daemon(path, body = {}) {
+async function direct(path, body) {
   if (!daemonPort) daemonPort = await findDaemon()
   if (!daemonPort) throw new Error('no daemon')
   const res = await fetch(`http://127.0.0.1:${daemonPort}${path}`, {
@@ -432,8 +453,33 @@ async function daemon(path, body = {}) {
     signal: AbortSignal.timeout(4000),
   })
   const payload = await res.json()
-  if (payload.ok === false) throw new Error(payload.error || 'daemon error')
+  if (payload.ok === false) {
+    // The daemon answered, and the answer was no. Marked so the caller knows
+    // not to go looking for a second opinion.
+    const said = new Error(payload.error || 'daemon error')
+    said.fromDaemon = true
+    throw said
+  }
   return payload.result
+}
+
+async function throughTheWorker(path, body) {
+  const res = await worker({ t: 'panel.daemon', path, body }, 6000)
+  if (!res || res.error) throw new Error(res?.error || 'the extension background did not answer')
+  return res.result
+}
+
+async function daemon(path, body = {}) {
+  if (throughWorker) return throughTheWorker(path, body)
+  try {
+    return await direct(path, body)
+  } catch (e) {
+    if (e?.fromDaemon) throw e
+    // Could not get a request out at all. Once is enough to stop trying.
+    throughWorker = true
+    daemonPort = null
+    return throughTheWorker(path, body)
+  }
 }
 
 /* ------------------------------------------------ the service worker */
@@ -457,9 +503,11 @@ let timer = null
 async function refresh() {
   try {
     const o = await daemon('/api/overview')
+    lastPort = o.port ?? lastPort
     render({ jobs: o.jobs, workflows: o.workflows }, true, o.browsers)
-    // The port is discovered, so the link cannot be a static href.
-    els.dashboardLink.href = `http://127.0.0.1:${daemonPort}/`
+    // The port is discovered, so the link cannot be a static href — and when
+    // the popup could not probe for it, the overview says which one answered.
+    els.dashboardLink.href = `http://127.0.0.1:${daemonPort ?? o.port}/`
   } catch {
     daemonPort = null
     render({ jobs: [], workflows: [] }, false, [])

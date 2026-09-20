@@ -805,6 +805,17 @@ async function route(msg, sendResponse) {
     case 'record.repointDone':
       sendResponse(await finishRepoint(msg.pick))
       break
+    /**
+     * Ask the daemon on the popup's behalf.
+     *
+     * The popup asks it directly and only falls back to here — see `daemon()`
+     * in panel.js for why it has to be able to. A worker has one thing the
+     * popup does not: its requests are not a document's, and the browser
+     * restriction that blocks the popup does not apply to them.
+     */
+    case 'panel.daemon':
+      sendResponse(await daemon(msg.path, msg.body))
+      break
     case 'panel.workflow.activate':
       sendResponse(await daemon('/api/workflows.activate', { name: msg.name }))
       break

@@ -131,13 +131,22 @@ you reach for while standing on a site. A list you scan past to find the two
 entries that apply costs more than it gives, and everything else is one click
 away on the dashboard.
 
-**The panel reads from the daemon, not from the service worker.** `panel.js`
-fetches `/api/overview` over HTTP directly. Routing panel state through the
-worker meant a sleeping or wedged worker made the popup claim the daemon was
-down — and an MV3 listener that returns `true` without calling `sendResponse`
-hangs the caller forever with nothing logged anywhere. The worker is needed to
-*drive* a browser (tabs, scripting, recording); it is not needed to *describe*
-one. Keep that split.
+**The panel reads from the daemon directly, and through the worker only when it
+cannot.** `panel.js` fetches `/api/overview` over HTTP itself, because routing
+panel state through the worker meant a sleeping or wedged worker made the popup
+claim the daemon was down — and an MV3 listener that returns `true` without
+calling `sendResponse` hangs the caller forever with nothing logged anywhere.
+The worker is needed to *drive* a browser (tabs, scripting, recording); it is
+not needed to *describe* one.
+
+The fallback is there because **Chrome gates the loopback address space per
+document**. Every fetch the popup made for itself was refused — *"Permission was
+denied for this request to access the `loopback` address space"* — while the
+worker's went through untouched, so recording kept working and every button in
+the popup quietly did nothing. The manifest asks for `localNetworkAccess`, which
+is the proper fix; the fallback is what makes the popup work on a browser that
+refuses anyway. **Only a transport failure falls back** — an error the daemon
+returned is an answer, and asking again down a different road would hide it.
 
 **Every `chrome.runtime` call from a content script goes through `send()` in
 `recorder.js`.** Reloading the extension destroys the context an injected script
@@ -253,6 +262,11 @@ navigation rebuilds the panel into a window that may be a different size.
 Position is inline `!important` because the stylesheet's placement is
 `!important` too, and is remembered in `sessionStorage` — wrapped, since an
 opaque origin throws SecurityError on every access to it.
+
+**A stub that always succeeds cannot fail.** The popup's tests replaced `fetch`
+with something that always returned data, so a popup whose every request was
+being refused looked exactly like one that worked — and the bug shipped. Any
+test that stubs a transport needs a sibling that stubs it *refusing*.
 
 **No settings page.** Anything the daemon or the extension can work out — the
 port, the profile, the timeouts — is worked out. A new user-facing option needs

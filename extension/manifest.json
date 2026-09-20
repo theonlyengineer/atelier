@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Atelier",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Build a browser workflow step by step, then let your coding agent replay it.",
   "minimum_chrome_version": "116",
   "background": {
@@ -17,7 +17,8 @@
     "tabs",
     "scripting",
     "notifications",
-    "alarms"
+    "alarms",
+    "localNetworkAccess"
   ],
   "host_permissions": [
     "http://127.0.0.1/*"
