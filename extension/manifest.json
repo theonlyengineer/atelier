@@ -8,22 +8,24 @@
     "service_worker": "src/background.js",
     "type": "module"
   },
-  "side_panel": {
-    "default_path": "src/panel/panel.html"
-  },
   "action": {
-    "default_title": "Atelier"
+    "default_title": "Atelier",
+    "default_popup": "src/panel/panel.html"
   },
   "permissions": [
     "storage",
     "tabs",
     "scripting",
     "notifications",
-    "sidePanel",
     "alarms"
   ],
-  "host_permissions": ["http://127.0.0.1/*"],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "icons": {
     "128": "src/icons/icon128.png"
   }

@@ -15,7 +15,7 @@ const log = (...a) => console.log('[atelier]', ...a)
 
 let socket = null
 let port = null
-/** Latest daemon state, mirrored so the side panel opens instantly. */
+/** Latest daemon state, mirrored so the popup opens instantly. */
 let state = { jobs: [], drafts: 0, workflows: [] }
 /* Recording state is NOT held here — see getRecording()/setRecording(). A module
    variable does not survive the service worker being terminated mid-recording. */
@@ -168,7 +168,11 @@ function notifyBlocked(job) {
 chrome.notifications.onClicked.addListener((id) => {
   if (!id.startsWith('atelier:')) return
   chrome.notifications.clear(id)
-  chrome.windows.getCurrent().then((w) => chrome.sidePanel.open({ windowId: w.id }))
+  // A popup can only be opened from a user gesture, and a notification click is
+  // not one Chrome will accept everywhere — so this is attempted and allowed to
+  // fail. The badge is what actually carries a parked job to the person; the
+  // notification is the nudge, not the only signal.
+  chrome.action.openPopup?.().catch(() => {})
 })
 
 /* ------------------------------------------------------ daemon messages */
@@ -242,7 +246,7 @@ async function runStep({ jobId, stepIndex, step, origins, workflowName }) {
         t: MSG.STEP_FAIL,
         jobId,
         stepIndex,
-        reason: `Atelier has not been given access to ${origins.join(', ')} — open the side panel and grant it, then resume`,
+        reason: `Atelier has not been given access to ${origins.join(', ')} — open the Atelier popup and grant it, then resume`,
         recoverable: true,
       })
       return
@@ -519,9 +523,78 @@ async function undoLastAction() {
   return rec.actions.length
 }
 
+/**
+ * Mark a recorded field as the thing that varies between runs, or as setup to
+ * be replayed exactly.
+ *
+ * The proposal pass guesses by taking the longest typed value, which is right
+ * for the common recording and exactly wrong for one that types a long constant
+ * into one field and a short varying thing into another — there is nothing in
+ * the trace that distinguishes the two. Only the person doing the task knows,
+ * and the moment they know it is while they are doing it, so the mark is made
+ * against the list in the panel rather than asked for afterwards.
+ */
+async function setActionRole(index, role) {
+  const rec = await getRecording()
+  if (!rec) return { error: 'no recording in progress' }
+  const action = rec.actions[index]
+  if (!action) return { error: 'no such action' }
+  if (action.kind !== 'type') return { error: 'only a typed field can be an input' }
+  if (action.secret) return { error: 'a password is never recorded, so it cannot be an input' }
+  // Clearing is a role of its own: it hands the field back to the guess rather
+  // than pinning it to whichever side the panel happened to show first.
+  if (role) action.role = role
+  else delete action.role
+  await setRecording(rec)
+  chrome.runtime
+    .sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions, mode: rec.mode } })
+    .catch(() => {})
+  return { ok: true, role: action.role ?? null }
+}
+
+/** The identity a field is known by, and the same one the proposal pass uses to
+ *  collapse: the best selector it was recorded with. */
+function fieldKey(element) {
+  const best = [...(element?.selectors ?? [])].sort((a, b) => b.score - a.score)[0]
+  return best ? `${best.strategy}:${best.value}` : null
+}
+
+/**
+ * Typing into the field you are already typing into is not another step.
+ *
+ * The recorder debounces per field, but any pause longer than the debounce emits
+ * a second action — so a sentence with a thought in the middle of it arrived as
+ * two, and going back to fix a word made three. `propose.ts` has always
+ * collapsed those, but not until the recording became a workflow, which left
+ * every screen before that — the count on the bar, the popup's list, the review
+ * — showing bursts of keystrokes as if they were steps.
+ *
+ * Only against the immediately preceding action, which is what keeps this a
+ * merge rather than a rewrite: type here, click there, type here again is three
+ * things that happened, in the order replay has to follow them.
+ */
+function mergesInto(previous, action) {
+  if (!previous || previous.kind !== 'type' || action.kind !== 'type') return false
+  if (previous.secret !== action.secret) return false
+  const key = fieldKey(action.element)
+  return key !== null && key === fieldKey(previous.element)
+}
+
 async function addAction(action) {
   const rec = await getRecording()
   if (!rec) return 0
+  const previous = rec.actions[rec.actions.length - 1]
+  if (mergesInto(previous, action)) {
+    // The later value is the complete one. The role is not: it was set against
+    // the field, and going back to correct a typo should not undo it.
+    rec.actions[rec.actions.length - 1] = { ...action, ...(previous.role ? { role: previous.role } : {}) }
+    if (action.origin && !rec.origins.includes(action.origin)) rec.origins.push(action.origin)
+    await setRecording(rec)
+    chrome.runtime
+      .sendMessage({ t: 'panel.recording', recording: { name: rec.draftName, actions: rec.actions, mode: rec.mode } })
+      .catch(() => {})
+    return rec.actions.length
+  }
   rec.actions.push(action)
   if (action.origin && !rec.origins.includes(action.origin)) rec.origins.push(action.origin)
   await setRecording(rec)
@@ -675,6 +748,17 @@ async function route(msg, sendResponse) {
       sendResponse({ ok: true, count: total })
       break
     }
+    // The page asks for the recording so far, to review it before saving. The
+    // popup gets the same thing from panel.hello; this is the same read, asked
+    // for by the surface the person is actually looking at.
+    case 'record.list': {
+      const rec = await getRecording()
+      sendResponse(rec ? { name: rec.draftName, actions: rec.actions } : { error: 'no recording in progress' })
+      break
+    }
+    case 'record.role':
+      sendResponse(await setActionRole(msg.index, msg.role))
+      break
     case 'record.undo': {
       const total = await undoLastAction()
       sendResponse({ ok: true, count: total })
@@ -713,7 +797,8 @@ async function route(msg, sendResponse) {
 /* ------------------------------------------------------------ lifecycle */
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
+  // The action opens a popup, declared in the manifest — there is nothing to
+  // configure at runtime the way a side panel needed to be.
   chrome.alarms.create('atelier-keepalive', { periodInMinutes: 0.5 })
   connect()
 })

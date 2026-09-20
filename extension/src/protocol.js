@@ -29,3 +29,4 @@ export const MSG = {
   STATE_REQUEST: 'state.request',
   PING: 'ping',
 }
+

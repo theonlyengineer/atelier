@@ -39,6 +39,12 @@
 [hidden] { display: none !important; }
 
 body {
+  /* A popup sizes itself to its content, so without an explicit width this
+     collapses to whatever the narrowest line happens to be. Chrome caps a popup
+     at 800x600 and scrolls past that, so take most of what is on offer: the
+     content here is a list of recorded steps and workflow cards, and squeezing
+     those into a column narrow enough to wrap every line helps nobody. */
+  width: 620px;
   margin: 0;
   padding: 14px;
   background: var(--bg);
@@ -217,6 +223,27 @@ button.tiny { font-size: 10px; padding: 3px 7px; margin-left: auto; flex: none; 
 .steps li { opacity: 0.85; }
 .steps li.is-capture { color: #7ee2a8; opacity: 1; }
 .steps li.is-secret { color: #98a2b3; font-style: italic; }
+
+/* A typed field carries a choice, so its row is a row rather than a line. */
+.steps li.has-role {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.steps li.has-role .step-note { flex: 1; min-width: 0; }
+/* A kept value is labelled rather than controlled here. The list is for seeing
+   what was heard; the decision belongs in the review, where the value is on
+   screen next to it. */
+.steps li.has-role .role.is-kept {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--fg);
+  background: var(--line);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
 
 .label-rec::before {
   content: '';

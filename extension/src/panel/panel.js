@@ -1,7 +1,12 @@
 /**
- * The side panel. Renders whatever the service worker last heard from the
- * daemon — it never polls, never computes state, and never asks a question the
- * system could answer itself.
+ * The popup behind the toolbar icon. Renders whatever the service worker last
+ * heard from the daemon — it never polls, never computes state, and never asks a
+ * question the system could answer itself.
+ *
+ * A popup closes the moment it loses focus, so it is not where a recording is
+ * driven from: the in-page bar carries Capture, Wait, Undo and Save while the
+ * person is working in the page. This is where you look at what was heard, and
+ * mark which fields vary between runs, once the typing is done.
  */
 
 const $ = (id) => document.getElementById(id)
@@ -29,6 +34,7 @@ const els = {
   captureSection: $('capture-section'),
   captureList: $('capture-list'),
   captureEmpty: $('capture-empty'),
+  captureLede: $('capture-lede'),
   captureSave: $('capture-save'),
   captureUndo: $('capture-undo'),
   captureDiscard: $('capture-discard'),
@@ -321,12 +327,35 @@ function renderRecording() {
   // recording comes back missing the step that mattered.
   const actions = recording.actions ?? []
   els.captureEmpty.hidden = actions.length > 0
+  els.captureLede.hidden = !actions.some((a) => a.kind === 'type' && !a.secret)
   els.captureList.replaceChildren(
     ...actions.map((a) => {
       const li = document.createElement('li')
-      li.textContent = describeAction(a)
       if (a.kind === 'capture') li.className = 'is-capture'
       if (a.secret) li.className = 'is-secret'
+
+      // A typed field is the one thing in a recording with a decision attached
+      // to it, so it is the one thing that gets a control.
+      if (a.kind !== 'type' || a.secret) {
+        li.textContent = describeAction(a)
+        return li
+      }
+
+      // Kept values read differently from the ones the agent will fill in, so
+      // the list says which is which — but the choice itself is made in the
+      // review, when the recording is saved, and only there.
+      li.classList.add('has-role')
+      const note = document.createElement('span')
+      note.className = 'step-note'
+      note.textContent = describeAction(a)
+      note.title = a.value ?? ''
+      li.append(note)
+      if (a.role === 'fixed') {
+        const kept = document.createElement('span')
+        kept.className = 'role is-kept'
+        kept.textContent = 'always this'
+        li.append(kept)
+      }
       return li
     }),
   )
@@ -497,10 +526,11 @@ function startPolling() {
 }
 
 /*
- * Chrome throttles timers hard in a document that is not visible — a side panel
- * behind another tab can drop to roughly one tick a minute. That is why the
- * panel looked frozen on backend changes made while it sat in the background.
- * Refresh the moment it comes back rather than waiting for the next tick.
+ * Refresh the moment the document becomes visible rather than waiting for the
+ * next tick. A popup is destroyed when it closes, so this now mostly matters on
+ * the first paint — but Chrome throttles timers hard in any document that is not
+ * visible, and this is what stopped the panel looking frozen on changes made
+ * while it was in the background.
  */
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') refresh()

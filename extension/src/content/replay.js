@@ -157,6 +157,47 @@
     el.dispatchEvent(new Event('change', { bubbles: true }))
   }
 
+  /** What can carry a produced artifact, in the order worth believing. Media
+   *  first: when a region holds both a result and a caption link, the result is
+   *  the one that was waited for. */
+  const SOURCE_TAGS = ['img, video, audio, source, embed, object', 'a[href], iframe']
+
+  /**
+   * The URL of whatever the captured element produced.
+   *
+   * Tries the element itself, then what is inside it, then the enclosing
+   * figure — because a recorded target is usually the *region* that was pointed
+   * at and the result turns up somewhere in it.
+   *
+   * This used to look for an `img` and nothing else, which quietly decided what
+   * Atelier could produce: a clip, a rendered file, a link offering one as a
+   * download all reached this branch and failed asking for an image that was
+   * never coming. `download` was in the step type and in the recorder the whole
+   * time and had no implementation here. Asking each candidate for whichever
+   * source it actually has covers every one of them in a single path.
+   *
+   * `currentSrc` comes first because on a media element it is the source the
+   * browser *chose* — the srcset candidate, or the `source` child that won — and
+   * the recorded attribute only holds what the markup asked for.
+   */
+  function resolveSource(el, attribute) {
+    const groups = SOURCE_TAGS.map((tags) => [
+      ...(el.querySelectorAll?.(tags) || []),
+      ...(el.closest?.('figure, picture')?.querySelectorAll?.(tags) || []),
+    ])
+    for (const node of [el, ...groups.flat()]) {
+      const value =
+        node.currentSrc ||
+        (attribute && node.getAttribute?.(attribute)) ||
+        node.getAttribute?.('src') ||
+        node.getAttribute?.('href') ||
+        node.getAttribute?.('data') ||
+        ''
+      if (value.trim()) return value
+    }
+    return null
+  }
+
   /** Turn a blob: URL into a data: URL. The service worker cannot fetch a blob
    *  belonging to a page's context, so the page has to read it. */
   async function inlineBlob(url) {
@@ -223,28 +264,20 @@
             return { ok: true, matched, capture: { as: 'text', value } }
           }
 
-          // The recorded target is often a wrapper — clicking "the picture"
-          // lands on a div, and a div has no src. Find the image inside it.
-          const img =
-            el.tagName === 'IMG' ? el : el.querySelector?.('img') || el.closest?.('figure, picture')?.querySelector?.('img')
-          if (!img) {
+          const source = resolveSource(el, step.capture?.attribute)
+          if (!source) {
             return {
               ok: false,
-              reason: 'no image inside the captured element yet — it may still be generating',
+              reason: 'nothing with a source inside the captured element yet — it may still be generating',
               recoverable: true,
             }
           }
 
-          const attr = step.capture?.attribute || 'src'
-          const value = img.currentSrc || img.getAttribute(attr) || img[attr]
-          if (!value) {
-            return { ok: false, reason: `the image has no ${attr} yet — it may still be generating`, recoverable: true }
-          }
-          const href = new URL(value, location.href).href
+          const href = new URL(source, location.href).href
           if (href.startsWith('blob:')) {
-            return { ok: true, matched, capture: { as: 'image', value: await inlineBlob(href) } }
+            return { ok: true, matched, capture: { as, value: await inlineBlob(href) } }
           }
-          return { ok: true, matched, capture: { as: 'image', value: href } }
+          return { ok: true, matched, capture: { as, value: href } }
         }
         default:
           return { ok: false, reason: `unknown step kind "${step.kind}"`, recoverable: false }

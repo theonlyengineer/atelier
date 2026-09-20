@@ -99,6 +99,17 @@
     return out
   }
 
+  /** Where Enter inserts a line rather than doing something. */
+  const takesNewlines = (el) => {
+    const node = el?.nodeType === 3 ? el.parentElement : el
+    if (!node) return false
+    return (
+      node instanceof HTMLTextAreaElement ||
+      node.isContentEditable === true ||
+      !!node.closest?.('textarea, [contenteditable="true"], [contenteditable=""]')
+    )
+  }
+
   /** Anything whose value is user content rather than identity. */
   const isTypeable = (el) =>
     el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable === true
@@ -227,9 +238,42 @@
 
   /* ------------------------------------------------------------ capture */
 
+  /**
+   * Everything this script says to the service worker goes through here.
+   *
+   * Reloading the extension at chrome://extensions destroys the context this
+   * script belongs to while the script itself keeps running in the page, with
+   * its listeners attached and its bar on screen. From that moment every
+   * `chrome.runtime` call throws "Extension context invalidated" — once per
+   * click, forever, with the bar still promising a recording that no longer
+   * exists.
+   *
+   * So a dead context is treated as an expected state rather than an error: the
+   * bar comes down, which is the honest thing to show, and nothing throws.
+   */
+  function send(message, onReply) {
+    // `chrome.runtime.id` goes undefined the moment the context is gone. It is
+    // the only cheap synchronous way to ask.
+    if (!chrome.runtime?.id) return teardown()
+    try {
+      const reply = chrome.runtime.sendMessage(message, (res) => {
+        // Reading lastError is what marks it handled. Unread, Chrome logs
+        // "Unchecked runtime.lastError" from a frame with no useful stack.
+        if (chrome.runtime.lastError) return
+        onReply?.(res)
+      })
+      // With a callback the return value is undefined; without one it is a
+      // promise that rejects when nothing is listening.
+      reply?.catch?.(() => {})
+    } catch {
+      // Thrown synchronously, which is what an invalidated context does.
+      teardown()
+    }
+  }
+
   function record(action) {
     count += 1
-    chrome.runtime.sendMessage({
+    send({
       t: 'record.action',
       action: { ...action, at: Date.now(), url: location.href, origin: location.origin },
     })
@@ -263,6 +307,10 @@
     // Arming a capture or a wait means this click is a *pointer*, not an action
     // to replay. Swallow it so the page does not also act on it.
     if (picking) {
+      // The bar sits over the top of the page, so it is the easiest thing in the
+      // window to hit by accident while pointing at something behind it. A click
+      // on our own furniture is not a choice about the page.
+      if (event.target?.closest?.('#atelier-bar')) return
       event.preventDefault()
       event.stopPropagation()
       const target = event.target
@@ -337,6 +385,14 @@
     }
     if (!['Enter', 'Tab', 'Escape'].includes(event.key)) return
     if (event.target?.closest?.('#atelier-bar')) return
+    // Enter in something that takes multi-line text is a newline, not an action.
+    // The typed value already contains it, so recording a step as well was both
+    // wrong and the thing that split one field's typing into three steps: the
+    // key landed between two bursts, and the merge only joins adjacent ones.
+    //
+    // A single-line input is the opposite case — there Enter submits, which is
+    // exactly the step that makes the workflow go.
+    if (event.key === 'Enter' && takesNewlines(event.target)) return
     record({ kind: 'key', value: event.key })
   }
 
@@ -377,6 +433,13 @@
     countEl = bar.querySelector('.atelier-count')
     statusEl = bar.querySelector('.atelier-status')
 
+    bar.addEventListener('pointerdown', onBarDown)
+    window.addEventListener('resize', onWindowResize)
+    // A navigation rebuilds the bar, so where it was put is read back rather
+    // than reset. Clamped on the way in: the window may be a different size.
+    barPlace = readBarPlace()
+    if (barPlace) clampBar()
+
     bar.addEventListener('click', (e) => {
       const act = e.target?.dataset?.act
       if (!act) return
@@ -384,14 +447,13 @@
       e.stopPropagation()
       if (act === 'save') {
         stopObserving()
-        chrome.runtime.sendMessage({ t: 'record.saveFromPage' })
-        teardown()
+        openReview()
       } else if (act === 'discard') {
         stopObserving()
-        chrome.runtime.sendMessage({ t: 'record.discardFromPage' })
+        send({ t: 'record.discardFromPage' })
         teardown()
       } else if (act === 'undo') {
-        chrome.runtime.sendMessage({ t: 'record.undo' }, (res) => {
+        send({ t: 'record.undo' }, (res) => {
           if (typeof res?.count === 'number') {
             count = res.count
             setCount(count)
@@ -406,6 +468,88 @@
 
   function setCount(n) {
     if (countEl) countEl.textContent = `${n} action${n === 1 ? '' : 's'}`
+  }
+
+  /* --------------------------------------------------------- moving it */
+
+  /**
+   * The bar can be dragged, and cannot be dragged away.
+   *
+   * It is positioned over a page it knows nothing about, so it will sometimes be
+   * sitting on the one control the person needs. Moving it is the fix. Clamping
+   * is what makes moving it safe: a fixed overlay dragged past an edge is not
+   * scrolled back into view by anything, so it would simply be gone for the rest
+   * of the recording, with no way to reach Save.
+   */
+  const BAR_EDGE = 8
+  const BAR_PLACE_KEY = 'atelier:bar-position'
+
+  /** Null until it has been moved, so an untouched bar stays centred by CSS and
+   *  keeps following the window on its own. */
+  let barPlace = null
+  let dragging = null
+
+  function readBarPlace() {
+    try {
+      const raw = sessionStorage.getItem(BAR_PLACE_KEY)
+      const parsed = raw && JSON.parse(raw)
+      return parsed && Number.isFinite(parsed.left) && Number.isFinite(parsed.top) ? parsed : null
+    } catch {
+      // Storage throws outright in some privacy modes. A bar that will not
+      // render is worse than one that forgets where it was put.
+      return null
+    }
+  }
+
+  /** Inline and !important, because the stylesheet's centring is !important too
+   *  and has to be beaten by something. */
+  function placeBar(left, top) {
+    if (!bar) return
+    barPlace = { left, top }
+    bar.style.setProperty('left', `${left}px`, 'important')
+    bar.style.setProperty('top', `${top}px`, 'important')
+    bar.style.setProperty('right', 'auto', 'important')
+    bar.style.setProperty('transform', 'none', 'important')
+    try {
+      sessionStorage.setItem(BAR_PLACE_KEY, JSON.stringify(barPlace))
+    } catch {
+      /* not worth failing a recording over */
+    }
+  }
+
+  /** Put it back inside, whether it was dragged out or the window shrank. */
+  function clampBar(left = barPlace?.left, top = barPlace?.top) {
+    if (!bar || left == null || top == null) return
+    const { width, height } = bar.getBoundingClientRect()
+    const maxLeft = Math.max(BAR_EDGE, window.innerWidth - width - BAR_EDGE)
+    const maxTop = Math.max(BAR_EDGE, window.innerHeight - height - BAR_EDGE)
+    placeBar(
+      Math.min(Math.max(left, BAR_EDGE), maxLeft),
+      Math.min(Math.max(top, BAR_EDGE), maxTop),
+    )
+  }
+
+  function onBarDown(event) {
+    // A control is for pressing. Only the bar's own background is a handle.
+    if (event.target?.closest?.('button')) return
+    const { left, top } = bar.getBoundingClientRect()
+    dragging = { dx: event.clientX - left, dy: event.clientY - top }
+    bar.classList.add('atelier-dragging')
+    event.preventDefault()
+    window.addEventListener('pointermove', onBarMove, true)
+    window.addEventListener('pointerup', onBarUp, true)
+  }
+
+  function onBarMove(event) {
+    if (!dragging) return
+    clampBar(event.clientX - dragging.dx, event.clientY - dragging.dy)
+  }
+
+  function onBarUp() {
+    dragging = null
+    bar?.classList.remove('atelier-dragging')
+    window.removeEventListener('pointermove', onBarMove, true)
+    window.removeEventListener('pointerup', onBarUp, true)
   }
 
   function setStatus(text) {
@@ -428,11 +572,165 @@
 
   /** One-action mode: capture, hand it back, and get out of the way. */
   function finishStepMode() {
-    chrome.runtime.sendMessage({ t: 'record.stepDone' })
+    send({ t: 'record.stepDone' })
     teardown()
   }
 
+  /* ------------------------------------------------------------ review */
+
+  let review = null
+
+  /** What a step will do, in the words of the person who did it. */
+  function reviewLine(action) {
+    const named = action.element?.label?.trim()
+    const on = named ? `“${named.slice(0, 40)}”` : action.element?.tag || 'the page'
+    switch (action.kind) {
+      case 'navigate': return ['Open', action.value || 'the page']
+      case 'click': return ['Click', on]
+      case 'key': return ['Press', action.value]
+      case 'wait': return [action.wait?.kind === 'hidden' ? 'Wait for' : 'Wait for', on]
+      case 'capture': return ['Capture the ' + (action.capture?.as || 'result'), 'from ' + on]
+      case 'type': return ['Type into', on]
+      default: return [action.kind, on]
+    }
+  }
+
+  /** `System instructions` → `system_instructions`, as the proposal pass will. */
+  function inputName(label) {
+    return (
+      (label || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 24) || 'input'
+    )
+  }
+
+  /**
+   * The review, in the page.
+   *
+   * Save used to commit the recording on the spot, which meant the only way to
+   * check what had been heard — and what each step would actually type — was to
+   * open the extension afterwards. The recording was made here; so is the place
+   * to read it back.
+   */
+  function openReview() {
+    send({ t: 'record.list' }, (res) => {
+      if (!res || res.error) return setStatus(res?.error || 'could not read the recording')
+      renderReview(res.name, res.actions || [])
+    })
+  }
+
+  function renderReview(name, actions) {
+    review?.remove()
+    review = document.createElement('div')
+    review.id = 'atelier-review'
+
+    const card = document.createElement('div')
+    card.className = 'atelier-review-card'
+
+    const head = document.createElement('div')
+    head.className = 'atelier-review-head'
+    head.innerHTML =
+      '<h2>Review “' + name + '”</h2>' +
+      '<p>This is what was heard, and what each step will do. Anything you typed becomes a ' +
+      'value the agent fills in — tick <b>always this</b> to keep the text instead.</p>'
+    card.append(head)
+
+    const list = document.createElement('ol')
+    list.className = 'atelier-review-list'
+    actions.forEach((action, index) => {
+      const li = document.createElement('li')
+      li.dataset.step = String(index)
+
+      const [verb, what] = reviewLine(action)
+      const line = document.createElement('div')
+      line.className = 'atelier-review-line'
+      line.innerHTML = '<span class="atelier-verb">' + verb + '</span> <span>' + (what || '') + '</span>'
+      li.append(line)
+
+      if (action.kind === 'type' && !action.secret) {
+        const kept = action.role === 'fixed'
+        const value = document.createElement('div')
+        value.className = 'atelier-review-value' + (kept ? ' is-kept' : '')
+        // The point of the whole screen: the text that will be typed, or the
+        // name of the value that will be asked for instead.
+        value.textContent = kept
+          ? action.value || ''
+          : '{{' + inputName(action.element?.label) + '}}  ·  ' + (action.value || '')
+        li.append(value)
+
+        const toggle = document.createElement('label')
+        toggle.className = 'atelier-review-toggle'
+        const box = document.createElement('input')
+        box.type = 'checkbox'
+        box.checked = kept
+        box.onchange = () => {
+          send({ t: 'record.role', index, role: box.checked ? 'fixed' : 'input' }, (res) => {
+            if (res?.error) return setStatus(res.error)
+            // Re-read rather than patch in place: the worker is the truth, and a
+            // screen that guessed what it did would drift from it.
+            openReview()
+          })
+        }
+        const words = document.createElement('span')
+        words.textContent = 'always this'
+        toggle.append(box, words)
+        li.append(toggle)
+      } else if (action.secret) {
+        const value = document.createElement('div')
+        value.className = 'atelier-review-value is-secret'
+        value.textContent = 'You will be asked to type this yourself — passwords are never recorded'
+        li.append(value)
+      }
+
+      list.append(li)
+    })
+    card.append(list)
+
+    const actionsRow = document.createElement('div')
+    actionsRow.className = 'atelier-review-actions'
+    actionsRow.innerHTML =
+      '<button class="atelier-btn atelier-save" data-act="confirm">Save workflow</button>' +
+      '<button class="atelier-btn" data-act="back">Keep recording</button>' +
+      '<button class="atelier-btn atelier-ghost" data-act="drop">Discard</button>'
+    card.append(actionsRow)
+
+    actionsRow.addEventListener('click', (e) => {
+      const act = e.target?.dataset?.act
+      if (!act) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (act === 'confirm') {
+        send({ t: 'record.saveFromPage' })
+        teardown()
+      } else if (act === 'drop') {
+        send({ t: 'record.discardFromPage' })
+        teardown()
+      } else {
+        closeReview()
+      }
+    })
+
+    review.append(card)
+    // On documentElement, like the bar: a page's own stacking contexts cannot
+    // then bury it.
+    document.documentElement.appendChild(review)
+  }
+
+  function closeReview() {
+    review?.remove()
+    review = null
+  }
+
+  function onWindowResize() {
+    clampBar()
+  }
+
   function teardown() {
+    closeReview()
+    onBarUp()
+    window.removeEventListener('resize', onWindowResize)
     active = false
     picking = null
     stopObserving()
