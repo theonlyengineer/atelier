@@ -34,7 +34,7 @@ type Handler = (body: any, deps: ApiDeps) => unknown
  * dashboard sat on stale data until the 25-second heartbeat came round.
  * Read-only is the exception you have to opt into.
  */
-const READ_ONLY = new Set(['list', 'get', 'status', 'health'])
+const READ_ONLY = new Set(['list', 'get', 'read', 'status', 'health'])
 
 export function mutates(path: string): boolean {
   const verb = path.split('.').pop() ?? ''
@@ -311,9 +311,15 @@ export const routes: Record<string, Handler> = {
   '/api/assets.list': (b) => ({ assets: repo.listAssets(b?.limit ?? 20, b?.tag) }),
 
   '/api/assets.get': (b) => {
-    const a = repo.getAsset(b?.id ?? missing('id'))
+    const a = repo.getProjectAsset(b?.id ?? missing('id'))
     if (!a) throw new Error(`no asset ${b.id}`)
     return { asset: a }
+  },
+
+  '/api/assets.read': (b) => {
+    const asset = repo.getProjectAsset(b?.id ?? missing('id'))
+    if (!asset) throw new Error(`no asset ${b.id}`)
+    return { asset, ...assets.readChunk(asset, b?.offset ?? 0, b?.length ?? 32768) }
   },
 
   '/api/assets.describe': (b) => {
@@ -343,7 +349,7 @@ export const routes: Record<string, Handler> = {
   },
 
   '/api/assets.attach': (b) => {
-    const a = repo.getAsset(b?.id ?? missing('id'))
+    const a = repo.getProjectAsset(b?.id ?? missing('id'))
     if (!a) throw new Error(`no asset ${b.id}`)
     const dest = b?.path ?? missing('path')
     assets.attach(a, dest)

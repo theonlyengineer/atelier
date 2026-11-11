@@ -272,7 +272,8 @@ workflow_health [name]         → what each step is matching on now vs. as reco
 repair_step   name, stepId     → fix where one step looks, without touching the rest
 list_jobs / job_status         → what ran, what is parked
 resume_job / cancel_job        → after the human clears an obstacle
-save_asset    id, path         → write the asset into the repo
+read_asset_chunk id, offset, length → download bounded base64 chunks and SHA-256/provenance
+save_asset    id, path         → copy on the daemon host (shared filesystem only)
 list_assets                    → reuse instead of regenerate
 describe_asset id, description → say what an asset actually shows
 list_drafts / get_draft        → the raw recording, for diagnosing a bad workflow
@@ -318,3 +319,11 @@ sensible retry is a human looking at the screen.
 
 See `docs/architecture.md` for how it fits together, and `docs/security.md` for
 what this can and cannot do.
+
+
+For remote agents or containerized daemons, use `read_asset_chunk` instead of
+`save_asset`. Decode chunks locally, follow `nextOffset` until `totalBytes`, and
+verify the assembled bytes against `sha256` before registering them. Each chunk
+also has `chunkSha256`; `length: 0` retrieves metadata without image bytes.
+Chunks are bounded to 65,536 bytes and remain scoped to the connection's project.
+A daemon-side path is not a download destination on another machine.

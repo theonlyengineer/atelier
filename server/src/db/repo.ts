@@ -498,6 +498,12 @@ export function getAsset(id: string): Asset | null {
   return r ? rowToAsset(r as Record<string, unknown>) : null
 }
 
+/** Exact project-scoped lookup for downloads; IDs do not grant cross-project access. */
+export function getProjectAsset(id: string, projectId = activeProject().id): Asset | null {
+  const row = open().prepare('SELECT * FROM asset WHERE id = ? AND project_id = ?').get(id, projectId)
+  return row ? rowToAsset(row as Record<string, unknown>) : null
+}
+
 export function listAssets(limit = 50, tag?: string, projectId = activeProject().id): Asset[] {
   const db = open()
   const rows = tag

@@ -292,7 +292,7 @@ export function buildServer(session: Session): McpServer {
         return `  ${asset.id}  ${asset.mime}${dims}  ${Math.round(asset.bytes / 1024)}kB`
       })
       return text(
-        `Job ${job.id} done. Produced:\n${lines.join('\n')}\n\nUse save_asset to write one into the repo.`,
+        `Job ${job.id} done. Produced:\n${lines.join('\n')}\n\nUse read_asset_chunk for a portable download, or save_asset when the repo shares the daemon filesystem.`,
       )
     },
   )
@@ -533,6 +533,23 @@ export function buildServer(session: Session): McpServer {
       } catch (e) {
         return fail((e as Error).message)
       }
+    },
+  )
+
+  server.registerTool(
+    'read_asset_chunk',
+    {
+      title: 'Read stored asset bytes',
+      description: 'Download a project asset without a shared filesystem. Returns base64 bytes, asset provenance, full SHA-256 and chunk SHA-256. Start at offset 0, follow nextOffset until totalBytes, decode and verify the assembled hash before writing locally. Use length 0 for metadata only. save_asset writes on the daemon host; this tool works from a remote coding agent.',
+      inputSchema: {
+        id: z.string().describe('Asset id from run_workflow or list_assets.'),
+        offset: z.number().int().min(0).default(0),
+        length: z.number().int().min(0).max(65536).default(32768),
+      },
+    },
+    async ({ id, offset, length }) => {
+      try { return text(JSON.stringify(await call('/api/assets.read', { id, offset, length }))) }
+      catch (e) { return fail((e as Error).message) }
     },
   )
 

@@ -10,7 +10,7 @@
  */
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -127,7 +127,7 @@ test('an agent with the token gets the same tools the stdio process offers', asy
   })
   const payload = await readResult(res)
   const names = payload.result.tools.map((t: { name: string }) => t.name)
-  for (const expected of ['atelier_status', 'run_workflow', 'list_workflows', 'save_asset', 'use_project']) {
+  for (const expected of ['atelier_status', 'run_workflow', 'list_workflows', 'save_asset', 'read_asset_chunk', 'use_project']) {
     assert.ok(names.includes(expected), `expected the ${expected} tool, got ${names.join(', ')}`)
   }
 })
@@ -199,4 +199,37 @@ test('the config downloads as a file rather than rendering in the tab', async ()
   const res = await fetch(`http://127.0.0.1:${PORT}/mcp.json`)
   assert.match(res.headers.get('content-disposition') ?? '', /\.mcp\.json/)
   await res.text()
+})
+
+
+test('portable asset reads carry bytes and reject another project through the real MCP token gate', async () => {
+  const assets = await import('../src/core/assets.ts')
+  const asset = repo.withProject(projectId, () => assets.store(Buffer.from('portable fixture'), {mime:'image/png',prompt:'audit prompt'}))
+  const other = repo.createProject('Chunk outsider')
+  const foreign = repo.withProject(other.id, () => assets.store(Buffer.from('secret fixture'), {mime:'image/png'}))
+  const sessionId = await initialize()
+  const call = async (id: string) => readResult(await fetch(URL, {
+    method:'POST',headers:{...HEADERS,'mcp-session-id':sessionId},
+    body:rpc(20,'tools/call',{name:'read_asset_chunk',arguments:{id,offset:0,length:65536}}),
+  }))
+  const own = await call(asset.id)
+  const value = JSON.parse(own.result.content[0].text)
+  assert.equal(Buffer.from(value.content,'base64').toString(),'portable fixture')
+  assert.equal(value.asset.prompt,'audit prompt')
+  assert.equal(value.sha256,asset.sha256)
+  const denied = await call(foreign.id)
+  assert.equal(denied.result.isError,true)
+  assert.match(denied.result.content[0].text,/no asset/)
+})
+
+
+test('daemon-host save retains project-token isolation for both allowed and denied copies', async () => {
+ const assets=await import('../src/core/assets.ts')
+ const own=repo.withProject(projectId,()=>assets.store(Buffer.from('own copied bytes'),{mime:'image/png'}))
+ const other=repo.createProject('Copy outsider')
+ const foreign=repo.withProject(other.id,()=>assets.store(Buffer.from('foreign bytes'),{mime:'image/png'}))
+ const sessionId=await initialize(),destination=join(process.env.ATELIER_HOME!,'own-copy.png'),denied=join(process.env.ATELIER_HOME!,'foreign-copy.png')
+ const save=async(id:string,path:string)=>readResult(await fetch(URL,{method:'POST',headers:{...HEADERS,'mcp-session-id':sessionId},body:rpc(21,'tools/call',{name:'save_asset',arguments:{id,path}})}))
+ const positive=await save(own.id,destination);assert.notEqual(positive.result.isError,true);assert.equal(readFileSync(destination).toString(),'own copied bytes')
+ const negative=await save(foreign.id,denied);assert.equal(negative.result.isError,true);assert.match(negative.result.content[0].text,/no asset/);assert.equal(existsSync(denied),false)
 })

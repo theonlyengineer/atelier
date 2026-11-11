@@ -4,7 +4,7 @@
  * are different and both are worth keeping.
  */
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync, existsSync, readFileSync, copyFileSync, unlinkSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, copyFileSync, unlinkSync, openSync, closeSync, readSync, fstatSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { blobPath } from '../paths.ts'
 import * as repo from '../db/repo.ts'
@@ -78,6 +78,27 @@ export function store(
 
 export function read(asset: Asset): Buffer {
   return readFileSync(blobPath(asset.sha256))
+}
+
+/** Portable bounded download. The caller verifies the final assembled SHA-256. */
+export function readChunk(asset: Asset, offset = 0, length = 32768) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > asset.bytes ||
+      !Number.isSafeInteger(length) || length < 0 || length > 65536)
+    throw new Error('Invalid asset range: use an integer offset and 0..65536 bytes.')
+  const handle = openSync(blobPath(asset.sha256), 'r')
+  try {
+    if (fstatSync(handle).size !== asset.bytes) throw new Error('Stored asset size differs from its metadata.')
+    const buffer = Buffer.alloc(Math.min(length, asset.bytes - offset))
+    let received = 0
+    while (received < buffer.length) {
+      const count = readSync(handle, buffer, received, buffer.length - received, offset + received)
+      if (!count) throw new Error('Stored asset is truncated.')
+      received += count
+    }
+    return { offset, bytes: received, totalBytes: asset.bytes, sha256: asset.sha256,
+      chunkSha256: createHash('sha256').update(buffer).digest('hex'),
+      nextOffset: offset + received, content: buffer.toString('base64') }
+  } finally { closeSync(handle) }
 }
 
 /** Copy an asset into the working tree. The one operation that leaves ~/.atelier. */
