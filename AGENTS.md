@@ -7,8 +7,9 @@ this workspace, and it is written **agent-agnostic**: it must read correctly for
 Codex, Antigravity, OpenCode, a person). Do not name one agent's tools, models, files or commands in a rule; anything
 specific to a particular agent goes in the wiki page `gtm/wiki/agent-specific-instructions.md`, and `AGENTS.md`
 refers to it. Do not write agent-specific rule files (`CLAUDE.md`, `GEMINI.md`, `.cursorrules` and the like) and do
-not keep a rule only in one agent's private memory: it is invisible to the other agents. If a tool insists on its own
-file name, that file contains one line, `@AGENTS.md`, and nothing else. When Nizar gives a rule, write it into the
+not keep a rule only in one agent's private memory: it is invisible to the other agents. No per-agent file is needed:
+every supported agent reads `AGENTS.md` (details and how each agent loads it: the wiki page above), and a leftover
+per-agent file can even stop an agent loading `AGENTS.md`. When Nizar gives a rule, write it into the
 relevant `AGENTS.md` (the workspace root `AGENTS.md` for rules that span repositories), and commit it like any other
 change.
 
