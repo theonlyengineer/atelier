@@ -1,13 +1,16 @@
-# CLAUDE.md — Atelier
+# AGENTS.md — Atelier
 
-## Instruction files (hard rule for every agent: Claude Code, Codex, agy, any other)
+## Instruction files (hard rule for every agent)
 
 `AGENTS.md` is the **only** place rules, guidelines and project knowledge for agents live, in every repository of
-this workspace. Do not write agent-specific rule files (`CLAUDE.md`, `GEMINI.md`, `.cursorrules` and the like) and
-do not copy rules into one agent's private memory: a rule kept there is invisible to the other agents. If a tool
-insists on its own file name, that file contains one line, `@AGENTS.md`, and nothing else. When Nizar gives a rule,
-write it into the relevant `AGENTS.md` (the workspace root `AGENTS.md` for rules that span repositories), and commit
-it like any other change.
+this workspace, and it is written **agent-agnostic**: it must read correctly for any coding agent (Claude Code,
+Codex, Antigravity, OpenCode, a person). Do not name one agent's tools, models, files or commands in a rule; anything
+specific to a particular agent goes in the wiki page `gtm/wiki/agent-specific-instructions.md`, and `AGENTS.md`
+refers to it. Do not write agent-specific rule files (`CLAUDE.md`, `GEMINI.md`, `.cursorrules` and the like) and do
+not keep a rule only in one agent's private memory: it is invisible to the other agents. If a tool insists on its own
+file name, that file contains one line, `@AGENTS.md`, and nothing else. When Nizar gives a rule, write it into the
+relevant `AGENTS.md` (the workspace root `AGENTS.md` for rules that span repositories), and commit it like any other
+change.
 
 Local asset pipeline: a daemon serving MCP, and a Chrome extension that builds
 and replays browser workflows to produce assets. Read `README.md` for what it
@@ -30,7 +33,7 @@ server/         TypeScript, Node 22+, no native deps
     ws/             protocol + connection hub
     http/api.ts     the control API the MCP surface and the extension call
     http/dashboard.ts  the whole dashboard, one template literal
-    mcp/tools.ts    the tool surface Claude Code sees, built per session
+    mcp/tools.ts    the tool surface an agent sees, built per session
     mcp/session.ts  one agent session: its project binding and how it calls
     mcp/bin.ts      stdio entry — a process per session
     mcp/http.ts     Streamable HTTP entry — a session per Mcp-Session-Id
@@ -346,8 +349,8 @@ get it. An `McpServer` connects to exactly one transport, which is why this is a
 factory rather than a module-scope singleton.
 
 **A session's project binding must never be process-wide again.** It used to be
-a module variable in `client.ts`, correct while one MCP process was one Claude
-Code session. The daemon now serves MCP over HTTP to many sessions at once, so
+a module variable in `client.ts`, correct while one MCP process was one agent
+session. The daemon now serves MCP over HTTP to many sessions at once, so
 it lives in the object `createSession()` returns and the caller decides the
 lifetime. A module variable here would mean two agents silently sharing a
 project, which is the exact failure projects were introduced to prevent.
@@ -368,7 +371,7 @@ request. Neither omission is an oversight to tidy up.
 
 **Every daemon capability needs an MCP tool.** The API routes exist so the MCP
 surface can call them, not so a human can curl them — if a capability is only
-reachable over HTTP, Claude Code cannot use it consistently and will improvise.
+reachable over HTTP, an agent cannot use it consistently and will improvise.
 When you add a route to `http/api.ts`, add the matching tool in `mcp/tools.ts`
 in the same change. The one deliberate exception is `projects.rotateToken`: an
 agent revoking its own credential mid-session would cut itself off, and the
